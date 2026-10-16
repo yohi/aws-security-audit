@@ -37,6 +37,13 @@ def build_web_review_bundle(metadata: dict, rows: list[dict], findings: list, in
             'account_status': row['判定'],
             'regional_status': row['対象地域判定'],
             'region_coverage': row['地域網羅'],
+            'observed_property_summary': {
+                'property_ok': row.get('確認済み属性OK', 0),
+                'property_fail': row.get('確認済み属性NG', 0),
+                'unknown_or_context': row.get('属性未確認・参考', 0),
+                'evidence_state': row.get('属性証拠カバレッジ', 'NOT_ASSESSED'),
+                'does_not_prove_product_pass': True,
+            },
             'findings': by_number.get(number, []),
         })
     if len(controls) != 46 or len({c['number'] for c in controls}) != 46:
@@ -76,6 +83,8 @@ def build_web_review_bundle(metadata: dict, rows: list[dict], findings: list, in
             'Full account-scope deterministic investigation exists for controls #5 and #19; product-scope observations are PARTIAL_OBSERVED and not equivalent.',
             'For product scope, individual collection_errors may indicate failed tag/config reads. Empty tags do not prove absence of ownership.',
             'Aurora deletion protection applies to DB clusters; member instances can still be deleted, affecting availability.',
+            'Resource-level PROPERTY_OK and PROPERTY_FAIL are individual observed property checks, not a product-wide PASS or FAIL.',
+            'Use control_observations.rows to distinguish verified settings from unknowns instead of treating all MANUAL_REVIEW rows as equivalent.',
             'Product scope uses conservative identity evidence; shared/untagged services and inherited resources may be omitted.',
             'All other 44 controls retain their original scanner evidence limitations.',
             'Partial-region results can never establish account-wide PASS.',
