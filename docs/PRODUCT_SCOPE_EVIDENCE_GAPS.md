@@ -26,6 +26,22 @@ Sources:
 - [ELBv2 DescribeLoadBalancerAttributes](https://docs.aws.amazon.com/elasticloadbalancing/latest/APIReference/API_DescribeLoadBalancerAttributes.html)
 - [EC2 DescribeSnapshots](https://docs.aws.amazon.com/AWSEC2/latest/APIReference/API_DescribeSnapshots.html)
 
+## RDS storage encryption: #20 snapshot field correction
+
+The original draft `_add_rds` read `Encrypted` from every RDS snapshot. This is not a response field for `DescribeDBClusterSnapshots`, which returns `StorageEncrypted`. This silently produced `encrypted=null` for every cluster snapshot and left the resource evidence unverified, even when AWS returned a usable field.
+
+For the updated implementation:
+
+- `DBSnapshots`: read `Encrypted` and `StorageEncryptionType`.
+- `DBClusterSnapshots`: read `StorageEncrypted` and `StorageEncryptionType`.
+- `DBInstances` and `DBClusters`: interpret `StorageEncrypted` consistently with `StorageEncryptionType` so AWS-owned-key encryption is not incorrectly reported as plaintext.
+- If `StorageEncryptionType=sse-rds`, effective `encrypted=true` even when the legacy flag is false. `sse-kms` also means encryption is present (unless the legacy flag conflicts, then UNKNOWN). `none` with no conflicting true flag means `encrypted=false`.
+- If the encryption type is missing and the legacy flag is false, `encrypted=null` with `encryption_state=UNVERIFIED_ENCRYPTION_TYPE`, **not FAIL**. If type and flag conflict, preserve `CONFLICTING_EVIDENCE` and do not assert PASS/FAIL from that record. Unknown type values are also unverifiable. A positive legacy flag without a type is retained as encrypted evidence.
+- Preserve `encryption_flag_field`, `encryption_flag`, `storage_encryption_type`, `encryption_state` and effective `encrypted` in resource JSON/CSV/XLSX/Web handoff. Product control #20 asserts FAIL only where effective encrypted is explicitly false; no resource alone proves a complete product PASS.
+- Old JSON reports that recorded only `encrypted=null` lack the underlying API fields and **cannot be fixed retrospectively**. An authorized read-only rerun with the updated code is required to collect the lost metadata.
+
+Official API references: [DB cluster snapshot](https://docs.aws.amazon.com/AmazonRDS/latest/APIReference/API_DBClusterSnapshot.html), [DB snapshot API](https://docs.aws.amazon.com/boto3/latest/reference/services/rds/client/describe_db_snapshots.html), and [DB cluster response](https://docs.aws.amazon.com/AmazonRDS/latest/APIReference/API_DBCluster.html).
+
 ## Residual gaps (explicitly NOT closed)
 
 | Category | Remaining necessary evidence | Why retained as MANUAL_REVIEW/UNKNOWN |
