@@ -356,6 +356,9 @@ def attribute_resources(resources, product=None, product_tag=None):
             x['region'] == region and x['resource_type'] == 'db-instance'
             and x['attributes'].get('cluster_id') == rid for x in direct):
             reason = 'Parent cluster of directly matched RDS instance'
+        elif kind == 'db-instance' and attrs.get('cluster_id') and (
+            region, 'db-cluster', attrs['cluster_id']) in keys:
+            reason = 'Member DB instance of directly matched RDS cluster; may affect availability'
         elif kind in ('db-snapshot', 'db-cluster-snapshot') and attrs.get('source_db_id'):
             target_kind = 'db-instance' if kind == 'db-snapshot' else 'db-cluster'
             if (region, target_kind, attrs['source_db_id']) in keys:
