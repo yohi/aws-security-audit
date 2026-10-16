@@ -56,7 +56,7 @@ Official API references: [DB cluster snapshot](https://docs.aws.amazon.com/Amazo
 | #28/#31/#32/#33/#34–#39 | Engine audit, actual log delivery, account threat-detection/notification and patch/scan coverage | Pure resource inventory cannot prove the control |
 | #40–#46 policy/process | Approved documentation, repo pipelines, escalation trees, human evidence | Not inferable from AWS read-only API |
 
-A subsequent independent static review and authorized real AWS smoke test are required before merging PR #6; any real AWS inspection must use the existing AssumeRole + ReadOnlyAccess session and should not perform configuration changes. A complete 46-control product PASS is **not** an acceptance criterion for this incremental change.
+PR #6 has been merged. Subsequent product-scope extensions are separately reviewed in Draft PR #7; any real AWS inspection must use the existing AssumeRole + ReadOnlyAccess session and must not perform configuration changes. A complete 46-control product PASS is **not** established by the incremental evidence changes.
 
 ## Acceptance conditions
 
@@ -67,3 +67,22 @@ A subsequent independent static review and authorized real AWS smoke test are re
 - A shared VPC is RELATED, never proof of exclusive product ownership; unrelated other VPC resources remain outside the selected set.
 - #5/#19 supplemental product evidence clearly identifies PARTIAL_OBSERVED.
 - CI tests for Python 3.12/3.13 pass; AWS real-world API coverage and STS expiration behavior remain unverified until separately tested.
+
+
+## R4 next phase after PR #6 merge — bounded negative findings
+
+Draft PR #7 implements read-only additions without changing the original control definitions:
+
+- **#16**: `elbv2:DescribeSSLPolicies` fetches the exact protocol list of each observed HTTPS/TLS listener policy, rather than inferring enabled protocols from an SSL policy name. The product control reports a negative finding **only** for directly selected ALB HTTPS listeners where the API confirms `TLSv1`, `TLSv1.1`, or weaker protocols. Named policy without successful API response stays MANUAL_REVIEW; CloudFront/other paths, internal TLS, backend protocols remain unverified. The full TLS 1.2+ contract is not certified even when all observed protocols are modern.
+- **#22**: report a negative observation only for directly selected S3 buckets where `get_bucket_versioning` explicitly yields Disabled and `get_object_lock_configuration` specifically signals `ObjectLockConfigurationNotFoundError`. AccessDenied, unknown config, or Suspended is not promoted to FAIL/PASS.
+- **#5**: retain sanitized ingress/egress SG rule details (port/protocol/CIDR/referenced group/prefix list), not arbitrary rule descriptions. Rule presence is observational, not a proof of network reachability or least privilege.
+- **#27**: record subnet-level as well as VPC-level flow logs; ENI-level and delivery log content remain outside this increment.
+- **Security and scope**: no new AWS write operation, probe, AWS resource mutation, IAM permission grant, source-credential fallback or automatic LLM transfer.
+
+These rule-based FAIL observations do **not** replace the complete 46-control audit. See [Issue #8](https://github.com/yohi/aws-security-audit/issues/8) for staged coverage of effective IAM permissions, shared account services, CloudTrail, WAF, app/logging paths, restoration evidence and human process controls.
+
+AWS primary references:
+- [ELBv2 DescribeSSLPolicies](https://docs.aws.amazon.com/elasticloadbalancing/latest/APIReference/API_DescribeSSLPolicies.html)
+- [ALB SSL policies](https://docs.aws.amazon.com/elasticloadbalancing/latest/application/describe-ssl-policies.html)
+- [S3 versioning](https://docs.aws.amazon.com/AmazonS3/latest/userguide/Versioning.html)
+- [S3 Object Lock](https://docs.aws.amazon.com/AmazonS3/latest/userguide/object-lock.html)

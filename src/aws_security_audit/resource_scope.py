@@ -49,6 +49,21 @@ def _tagged(ctx, service, region, arn, errors, key='TagList'):
         return []  # Explicit uncertainty; never interpret failed tag lookup as untagged.
 
 
+def _sg_rule_evidence(rules):
+    """Only structured network identifiers. Do not store arbitrary rule descriptions."""
+    return [{
+        'protocol': rule.get('IpProtocol'),
+        'from_port': rule.get('FromPort'),
+        'to_port': rule.get('ToPort'),
+        'ipv4_cidrs': [x['CidrIp'] for x in rule.get('IpRanges', []) if x.get('CidrIp')],
+        'ipv6_cidrs': [x['CidrIpv6'] for x in rule.get('Ipv6Ranges', []) if x.get('CidrIpv6')],
+        'referenced_sg_ids': [x['GroupId'] for x in rule.get('UserIdGroupPairs', [])
+                             if x.get('GroupId')],
+        'prefix_list_ids': [x['PrefixListId'] for x in rule.get('PrefixListIds', [])
+                            if x.get('PrefixListId')],
+    } for rule in rules]
+
+
 def _add_ec2(ctx, region, out, errors):
     ec2 = ctx.client_cached('ec2', region)
     for reservation in paged(ec2, 'describe_instances', 'Reservations'):
@@ -67,7 +82,9 @@ def _add_ec2(ctx, region, out, errors):
         from .checks import dangerous_inbound
         out.append(_record('ec2', 'security-group', region, sg['GroupId'], tags=sg.get('Tags'),
                            vpc_id=sg.get('VpcId'),
-                           dangerous_ingress=sum(bool(dangerous_inbound(p)) for p in sg.get('IpPermissions', []))))
+                           dangerous_ingress=sum(bool(dangerous_inbound(p)) for p in sg.get('IpPermissions', [])),
+                           ingress_rules=_sg_rule_evidence(sg.get('IpPermissions', [])),
+                           egress_rules=_sg_rule_evidence(sg.get('IpPermissionsEgress', []))))
     for vol in paged(ec2, 'describe_volumes', 'Volumes'):
         out.append(_record('ec2', 'ebs-volume', region, vol['VolumeId'], tags=vol.get('Tags'),
                            encrypted=vol.get('Encrypted'), size_gib=vol.get('Size'),
@@ -87,8 +104,12 @@ def _add_ec2(ctx, region, out, errors):
                                        'delivery_status': log.get('DeliverLogsStatus')}
                                       for log in linked_logs]))
     for subnet in paged(ec2, 'describe_subnets', 'Subnets'):
+        linked_logs = [log for log in flow_logs if log.get('ResourceId') == subnet['SubnetId']]
         out.append(_record('ec2', 'subnet', region, subnet['SubnetId'], tags=subnet.get('Tags'),
-                           vpc_id=subnet.get('VpcId'), cidr_block=subnet.get('CidrBlock')))
+                           vpc_id=subnet.get('VpcId'), cidr_block=subnet.get('CidrBlock'),
+                           flow_logs=[{'id': log.get('FlowLogId'), 'status': log.get('FlowLogStatus'),
+                                       'delivery_status': log.get('DeliverLogsStatus')}
+                                      for log in linked_logs]))
     # DescribeSnapshots exposes VolumeId only for known snapshots; an absent
     # linkage is not proof that no backup belongs to the product.
     try:
@@ -181,8 +202,16 @@ def _add_rds(ctx, region, out, errors):
                            'operation': operation, 'reason': str(exc)[:180]})
 
 
+WEAK_TLS_PROTOCOLS = frozenset({'sslv2', 'sslv3', 'tlsv1', 'tlsv1.0', 'tlsv1.1'})
+
+
+def _weak_tls_protocols(protocols):
+    return [p for p in protocols if isinstance(p, str) and p.casefold() in WEAK_TLS_PROTOCOLS]
+
+
 def _add_elb(ctx, region, out, errors):
     elb = ctx.client_cached('elbv2', region)
+    tls_policy_cache = {}
     lbs = paged(elb, 'describe_load_balancers', 'LoadBalancers')
     # ALB/NLB tags are not present in DescribeLoadBalancers.
     tag_map = {}
@@ -221,6 +250,34 @@ def _add_elb(ctx, region, out, errors):
             except EvidenceUnavailable as exc:
                 errors.append({'region': region, 'service': 'elbv2', 'operation': operation,
                                'resource': arn, 'reason': str(exc)[:180]})
+        for listener in observed.get('listeners', []):
+            if listener.get('protocol') not in ('HTTPS', 'TLS'):
+                continue
+            policy = listener.get('ssl_policy')
+            if not policy:
+                errors.append({'region': region, 'service': 'elbv2',
+                               'operation': 'describe_ssl_policies', 'resource': arn,
+                               'reason': 'TLS listener has no policy name in observed metadata'})
+                continue
+            if policy not in tls_policy_cache:
+                try:
+                    response = api_call(elb, 'describe_ssl_policies', Names=[policy])
+                    matches = [p for p in response.get('SslPolicies', [])
+                               if p.get('Name') == policy]
+                    if len(matches) != 1 or not isinstance(matches[0].get('SslProtocols'), list) or not matches[0]['SslProtocols']:
+                        raise EvidenceUnavailable('elbv2.describe_ssl_policies: policy protocols unavailable')
+                    tls_policy_cache[policy] = matches[0]['SslProtocols']
+                except EvidenceUnavailable as exc:
+                    tls_policy_cache[policy] = None
+                    errors.append({'region': region, 'service': 'elbv2',
+                                   'operation': 'describe_ssl_policies', 'resource': arn,
+                                   'policy': policy, 'reason': str(exc)[:180]})
+            protocols = tls_policy_cache[policy]
+            listener['ssl_protocols'] = protocols
+            listener['weak_ssl_protocols'] = (_weak_tls_protocols(protocols)
+                                               if protocols is not None else None)
+            listener['ssl_protocol_evidence'] = ('API_VERIFIED' if protocols is not None
+                                                 else 'UNVERIFIED')
         if lb.get('Type') == 'application':
             try:
                 response = api_call(ctx.client_cached('wafv2', region),
@@ -282,7 +339,10 @@ def _add_s3(ctx, out, errors):
                 observed[name_key] = extract(api_call(s3, operation, Bucket=name))
             except EvidenceUnavailable as exc:
                 if any(code in str(exc) for code in benign_errors):
-                    observed[name_key] = None
+                    # Object Lock not configured is an observed negative state, unlike
+                    # an API error. Other missing configs have different semantics.
+                    observed[name_key] = (False if operation == 'get_object_lock_configuration'
+                                          else None)
                 else:
                     errors.append({'region': 'global', 'service': 's3',
                                    'operation': operation, 'resource': name,
@@ -474,7 +534,7 @@ def collect_resource_inventory(ctx, regions, product=None, product_tag=None):
 PRODUCT_OBSERVATION_FIELDS = {
     1: {'instance': ('state', 'public_ipv4', 'subnet_id', 'vpc_id')},
     2: {'db-instance': ('publicly_accessible', 'cluster_id', 'engine')},
-    5: {'security-group': ('dangerous_ingress', 'vpc_id')},
+    5: {'security-group': ('dangerous_ingress', 'vpc_id', 'ingress_rules', 'egress_rules')},
     6: {'application': ('scheme', 'waf_web_acl_arn', 'waf_web_acl_lookup')},
     14: {'instance': ('state', 'subnet_id')},
     16: {'application': ('listeners', 'scheme')},
@@ -491,7 +551,7 @@ PRODUCT_OBSERVATION_FIELDS = {
          'db-cluster-snapshot': ('encrypted', 'encryption_state', 'encryption_flag',
                                  'encryption_flag_field', 'storage_encryption_type', 'source_db_id')},
     22: {'bucket': ('versioning_status', 'object_lock_enabled')},
-    27: {'vpc': ('flow_logs',)},
+    27: {'vpc': ('flow_logs',), 'subnet': ('vpc_id', 'flow_logs')},
     29: {'application': ('access_logs',)},
     31: {'log-group': ('retention_days',)},
 }
@@ -585,10 +645,54 @@ def product_findings(inventory, regions):
                 selected, key, negative = [r for r in region_items if r['resource_type'] == 'db-instance'], 'publicly_accessible', True
             elif check.number == 5:
                 selected, key, negative = [r for r in region_items if r['resource_type'] == 'security-group'], 'dangerous_ingress', None
+            elif check.number == 16:
+                # AWS-provided policy protocol lists, never policy-name guesses.
+                # Only directly attributed ALBs can justify a product-specific FAIL.
+                weak_listeners = [
+                    (r, listener)
+                    for r in region_items
+                    if r['resource_type'] == 'application' and r['attribution'] == 'DIRECT'
+                    for listener in r['attributes'].get('listeners', [])
+                    if listener.get('protocol') == 'HTTPS'
+                    and listener.get('ssl_protocol_evidence') == 'API_VERIFIED'
+                    and listener.get('weak_ssl_protocols')
+                ]
+                if weak_listeners:
+                    status = 'FAIL'
+                    detail = f'直接帰属ALBのHTTPSリスナー{len(weak_listeners)}件でTLS 1.2未満の許容を確認'
+                    evidence.extend(
+                        f"{r['name']} ({r['resource_id']}): HTTPS port={listener.get('port')}, "
+                        f"ssl_policy={listener.get('ssl_policy')}, "
+                        f"weak_ssl_protocols={listener['weak_ssl_protocols']}, "
+                        "source=elbv2.describe_ssl_policies"
+                        for r, listener in weak_listeners
+                    )
+                else:
+                    detail = '直接帰属ALBで旧TLSを確認できない。未取得リスナー・内部通信等は未評価'
             elif check.number == 19:
                 selected, key, negative = [r for r in region_items if r['resource_type'] in ('ebs-volume', 'ebs-snapshot')], 'encrypted', False
             elif check.number == 20:
                 selected, key, negative = [r for r in region_items if r['resource_type'] in ('db-instance', 'db-cluster', 'db-snapshot', 'db-cluster-snapshot')], 'encrypted', False
+            elif check.number == 22:
+                # Control #22 is specifically versioning OR Object Lock. A disabled
+                # versioning configuration plus observed absent Object Lock is a
+                # direct, negative configuration observation for that bucket.
+                unprotected = [
+                    r for r in global_items
+                    if r['resource_type'] == 'bucket' and r['attribution'] == 'DIRECT'
+                    and r['attributes'].get('versioning_status') == 'Disabled'
+                    and r['attributes'].get('object_lock_enabled') is False
+                ]
+                if unprotected and region == regions[0]:
+                    status = 'FAIL'
+                    detail = f'直接帰属S3バケット{len(unprotected)}件でVersioning無効かつObject Lock未設定'
+                    evidence.extend(
+                        f"{r['name']} ({r['resource_id']}): "
+                        "versioning_status=Disabled; object_lock_enabled=False"
+                        for r in unprotected
+                    )
+                else:
+                    detail = '確認済みS3バケットでVersioning/Object Lock両方の未設定を観測せず。全体は未証明'
             elif check.number == 23:
                 clusters = {r['resource_id']: r for r in region_items if r['resource_type'] == 'db-cluster'}
                 instances = [r for r in region_items if r['resource_type'] == 'db-instance']

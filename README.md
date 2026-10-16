@@ -185,4 +185,16 @@ uv run --locked --no-sync aws-security-audit assess \\
   --llm export --out ./reports/scs2-tagged
 ```
 
-**Product scope is conservative, not a full 46-control certification.** It does not run the account-wide 46-control check suite and falsely relabel those results as product-specific. It emits 46 entries with `MANUAL_REVIEW`/`UNKNOWN` unless directly selected resources show a negative observation for #2 (RDS public), #5 (risky SG ingress), #19 (unencrypted EBS), #20 (unencrypted RDS) or #23 (RDS deletion protection). It deliberately does **not** claim PASS from absence of observed findings. SG/EBS inherited from EC2 attachment are marked RELATED and may be shared. Untagged/shared/unmatched resources can be omitted and must not be interpreted as absent. Tag API read failures are collection/attribution limitations, not proof of no resource. The original AWS audit remains investigation-only, uses existing AssumeRole security guard, and never makes AWS changes or automatic LLM uploads.
+**Product scope is conservative, not a full 46-control certification.** The existing account-wide checks are not blindly inherited. Product controls retain MANUAL_REVIEW/UNKNOWN unless an explicitly attributable resource has a deterministic negative observation (including #2, #5, #16, #19, #20, #22 and #23). Positive observations do not automatically certify PASS for an entire product.
+
+**Practical evidence view (R4):** The tool also emits a resource-by-resource `control_observations` matrix, independent from the final control verdict. It verifies selected configuration properties where concrete evidence exists:
+- `PROPERTY_OK`: that resource's particular configuration property matches the narrow rule. **Not a product-wide PASS**.
+- `PROPERTY_FAIL`: that resource's particular configuration property fails the narrow rule. Review context and attribution before relying on a product finding.
+- `PROPERTY_UNKNOWN`: missing, conflicting or permission-limited source data.
+- `CONTEXT_ONLY`: useful observed metadata insufficient for a property-level verdict.
+
+The terminal shows counts of controls with property evidence and OK/FAIL/uncertain property observations. The 46-item CSV/Excel summary includes these counts beside original verdicts, the product XLSX adds a 5th `属性別検証結果` worksheet (name/ID/ARN, proof and limits), and JSON/Web files include complete structured `control_observations.rows` and `by_control`. Account-scope XLSX retains its original 4-sheet layout.
+
+Examples: S3 bucket default encryption `AES256` is `PROPERTY_OK` for default encryption configuration only; a selected unencrypted EBS volume is `PROPERTY_FAIL`; a TLS policy without a verified AWS protocol response is `PROPERTY_UNKNOWN`. These must not be mistaken for full applicability, shared-service compliance, data-plane security or region-wide completeness.
+
+Shared VPC/SG/volume relationships remain RELATED and may be shared. Untagged/unmatched resources can be omitted; collection errors and incomplete attribution prevent blanket PASS. The audit remains investigation-only; it does not mutate AWS resources or automatically upload evidence to LLMs.

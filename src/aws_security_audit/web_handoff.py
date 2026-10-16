@@ -37,6 +37,13 @@ def build_web_review_bundle(metadata: dict, rows: list[dict], findings: list, in
             'account_status': row['判定'],
             'regional_status': row['対象地域判定'],
             'region_coverage': row['地域網羅'],
+            'observed_property_summary': {
+                'property_ok': row.get('確認済み属性OK', 0),
+                'property_fail': row.get('確認済み属性NG', 0),
+                'unknown_or_context': row.get('属性未確認・参考', 0),
+                'evidence_state': row.get('属性証拠カバレッジ', 'NOT_ASSESSED'),
+                'does_not_prove_product_pass': True,
+            },
             'findings': by_number.get(number, []),
         })
     if len(controls) != 46 or len({c['number'] for c in controls}) != 46:
@@ -76,8 +83,10 @@ def build_web_review_bundle(metadata: dict, rows: list[dict], findings: list, in
             'Full account-scope deterministic investigation exists for controls #5 and #19; product-scope observations are PARTIAL_OBSERVED and not equivalent.',
             'For product scope, individual collection_errors may indicate failed tag/config reads. Empty tags do not prove absence of ownership.',
             'Aurora deletion protection applies to DB clusters; member instances can still be deleted, affecting availability.',
+            'Resource-level PROPERTY_OK and PROPERTY_FAIL are individual observed property checks, not a product-wide PASS or FAIL.',
+            'Use control_observations.rows to distinguish verified settings from unknowns instead of treating all MANUAL_REVIEW rows as equivalent.',
             'Product scope uses conservative identity evidence; shared/untagged services and inherited resources may be omitted.',
-            'All other 44 controls retain their original scanner evidence limitations.',
+            'Only a limited subset of the 46 controls has resource-attribute verification; others have no direct product evidence.',
             'Partial-region results can never establish account-wide PASS.',
             'SG ingress and ENI attachments do not establish actual internet reachability.',
             'An LLM must not independently upgrade FAIL/UNKNOWN/MANUAL_REVIEW to PASS.',
@@ -110,6 +119,9 @@ WEB_REVIEW_PROMPT = """あなたはAWSセキュリティ監査の独立した調
    execution.audit_scope が product の場合は、アカウント全体と区別し、プロダクト範囲の帰属未確定を明記する。
    resource_inventory のName・resource_id・ARN・識別タグ・帰属根拠を一覧/突合する。
    product スコープで記録されたFAILは明示されたリソースに限定し、未収集リソースのPASSを推定しない。
+   control_observations.by_control と control_observations.rows（resource_inventory配下）を利用し、
+   46項目の正式判定とは独立に、資産・属性ごとのPROPERTY_OK／PROPERTY_FAIL／PROPERTY_UNKNOWN／CONTEXT_ONLYを集計する。
+   PROPERTY_OKは当該リソースの限定属性が確認された意味であり、プロダクト全体のPASSではない。
 2. 46項目の判定をすべて一覧化し、元の判定を保持する。
 3. 各FAILについて、観測された設定とセキュリティ上の影響を分けて評価し、
    実際に証明されたこと／未証明のこと／誤検知の可能性を区別する。
@@ -124,6 +136,7 @@ WEB_REVIEW_PROMPT = """あなたはAWSセキュリティ監査の独立した調
 - 46項目の判定一覧（No、項目名、元判定、根拠、未確認事項）
 - リソース別台帳（サービス、リージョン、Name、ID/ARN、識別タグ、プロダクト帰属、未判定範囲）
 - 検出事項の証拠評価、誤検知・過大評価の可能性
+- 資産・属性別の検証結果（PROPERTY_OK / PROPERTY_FAIL / PROPERTY_UNKNOWN / CONTEXT_ONLY）と、資産属性の証拠がない項目の明示。元の46項目判定を書き換えない。
 - 未確認項目と証拠不足の整理
 - #5と#19の追加分析
 - 総括（確定事実と未証明事項を厳密に分ける）

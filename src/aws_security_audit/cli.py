@@ -297,6 +297,19 @@ def main(argv: list[str] | None = None) -> int:
             if args.product:
                 print(f'PRODUCT SCOPE: {args.product} (conservative matching; unassigned/shared resources are not PASS)', flush=True)
                 inventory = collect_resource_inventory(ctx, regions, args.product, args.product_tag)
+                from .control_observations import build_product_observations
+                observed = build_product_observations(inventory, regions)
+                inventory['control_observations'] = observed
+                by_control = observed['by_control'].values()
+                print(
+                    'PRODUCT PROPERTY EVIDENCE: '
+                    f"controls_with_attributes={sum(x['observed_resources'] > 0 for x in by_control)}/46 "
+                    f"property_ok={sum(x['ok'] for x in observed['by_control'].values())} "
+                    f"property_fail={sum(x['fail'] for x in observed['by_control'].values())} "
+                    f"property_unknown_or_context={sum(x['unknown'] + x['context'] for x in observed['by_control'].values())} "
+                    '(resource-property checks only; no product-wide PASS inference)',
+                    flush=True,
+                )
                 records = product_findings(inventory, regions)
                 for item in records:
                     if item.status == 'FAIL':
@@ -314,7 +327,10 @@ def main(argv: list[str] | None = None) -> int:
         else:
             records = run_scan(ctx, regions, options)
         full_coverage = set(regions) == set(options['all_account_regions'])
-        overview = overall_rows(records, coverage_full=full_coverage)
+        overview = overall_rows(
+            records, coverage_full=full_coverage,
+            observations=inventory.get('control_observations') if inventory is not None else None,
+        )
         counts = Counter(x['判定'] for x in overview)
         metadata = {
             'version': __version__, 'timestamp': timestamp(), 'account': ctx.account,
