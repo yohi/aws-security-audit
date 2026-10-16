@@ -136,3 +136,23 @@ uv run --locked --no-sync aws-security-audit version
 ```
 
 Use a **reviewed, signed-off commit SHA** rather than a moving branch or tag. An actual independent user-side run, platform/architecture evaluation, build-tool pin/hash review and dependency artifact verification remain necessary before closing STS2-004. Neither installation path is an OS sandbox: the process can access host AWS login credentials.
+
+## Investigation-only one-command workflow (Draft PR #4)
+
+For read-only research without AWS remediation, run:
+
+```bash
+uv run --locked --no-sync aws-security-audit assess \
+  --source-profile default \
+  --role-arn arn:aws:iam::168975706502:role/scs2-stg-ecs-tasks-role \
+  --regions all \
+  --llm export \
+  --out ./reports
+```
+
+This runs the existing 46 checks and supplemental inspection for #5 (dangerous security-group ingress with ENI attachment) and #19 (unencrypted EBS with EC2/ASG context and default encryption state). The original judgments are **never silently changed** based on LLM speculation.
+
+`--llm export` creates a **local, aggregate, redacted Markdown packet** for manual review; it does not call an LLM or send evidence anywhere. Use `--llm off` to skip packet creation. The local JSON investigation report includes resource IDs and is protected by 0600 permissions on POSIX.
+
+This is **investigation only**: no AWS IAM, networking, EBS, EC2, logging, or Security Hub configuration changes; no automated remediation; no active probing. Any claim of effective IAM No-Write remains **NOT PROVEN**, regardless of session policy. The full operating contract and limitations are in [docs/INVESTIGATION_ONLY.md](docs/INVESTIGATION_ONLY.md).
+
