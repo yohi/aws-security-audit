@@ -201,3 +201,48 @@ def test_shared_trail_success_without_guaranteed_product_association(monkeypatch
     assert obs['by_control']['25']['context'] == 1
     assert obs['by_control']['24']['ok'] == 0
     assert obs['by_control']['24']['fail'] == 0
+
+
+def test_product_inventory_keeps_shared_evidence_unowned_and_account_mode_unchanged(monkeypatch):
+    import aws_security_audit.resource_scope as scope
+    class AuditCtx:
+        def guard_expiration(self):
+            pass
+
+    def add_resource(ctx, region, output, errors):
+        output.append(_record('ec2', 'instance', region, 'i-ros',
+                              tags=[{'Key': 'Product', 'Value': 'ros'}],
+                              public_ipv4=False))
+
+    calls = {'shared': 0}
+    def shared(ctx, regions, errors):
+        calls['shared'] += 1
+        assert regions == [REGION]
+        errors.append({'region': REGION, 'service': 'securityhub',
+                       'operation': 'describe_hub', 'reason': 'AccessDenied'})
+        return {'regions': [], 'attribution': 'SHARED_UNATTRIBUTED',
+                'product_protection_proven': False}
+
+    monkeypatch.setattr(scope, '_add_ec2', add_resource)
+    monkeypatch.setattr(scope, '_add_rds', lambda *a: None)
+    monkeypatch.setattr(scope, '_add_elb', lambda *a: None)
+    monkeypatch.setattr(scope, '_add_logs', lambda *a: None)
+    monkeypatch.setattr(scope, '_add_s3', lambda *a: None)
+    monkeypatch.setattr(scope, '_add_iam', lambda *a: None)
+    monkeypatch.setattr(scope, '_add_cloudfront', lambda *a: None)
+    monkeypatch.setattr(
+        'aws_security_audit.shared_security_evidence.collect_shared_security_evidence', shared)
+
+    product = scope.collect_resource_inventory(AuditCtx(), [REGION], 'ros')
+    assert calls['shared'] == 1
+    assert product['scope']['matched'] == 1
+    assert product['scope']['collection_errors'] == 1
+    assert product['resources'][0]['resource_id'] == 'i-ros'
+    assert product['shared_control_evidence']['attribution'] == 'SHARED_UNATTRIBUTED'
+    assert all(r['service'] != 'securityhub' for r in product['resources'])
+    assert product['collection_errors'][0]['operation'] == 'describe_hub'
+
+    account = scope.collect_resource_inventory(AuditCtx(), [REGION], None)
+    assert calls['shared'] == 1
+    assert 'shared_control_evidence' not in account
+    assert account['collection_errors'] == []
