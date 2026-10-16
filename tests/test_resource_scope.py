@@ -199,3 +199,124 @@ def test_all_detected_evidence_is_preserved_beyond_old_100_item_cap(tmp_path):
         assert book.testzip() is None
         details_xml = book.read('xl/worksheets/sheet2.xml').decode('utf-8')
         assert 'EXCEL CELL TRUNCATED' in details_xml
+
+
+def test_aurora_cluster_deletion_protection_does_not_inherit_member_false():
+    from aws_security_audit.resource_scope import product_findings
+    region = 'ap-northeast-1'
+    resources = [
+        _record('rds', 'db-cluster', region, 'ros-cluster',
+                tags=[{'Key': 'Product', 'Value': 'ros'}],
+                engine='aurora-postgresql', deletion_protection=True),
+        _record('rds', 'db-instance', region, 'ros-writer',
+                tags=[{'Key': 'Product', 'Value': 'ros'}],
+                engine='aurora-postgresql', cluster_id='ros-cluster',
+                deletion_protection=False),
+    ]
+    selected, _ = attribute_resources(resources, 'ros')
+    finding = {f.number: f for f in product_findings({'resources': selected}, [region])}[23]
+    assert finding.status == 'MANUAL_REVIEW'
+    assert any('Aurora cluster' in e and 'deletion_protection=True' in e
+               for e in finding.evidence)
+    assert any('Aurora instance' in e and 'instance_deletion_protection=False' in e
+               for e in finding.evidence)
+    resources[0]['attributes']['deletion_protection'] = False
+    finding = {f.number: f for f in product_findings({'resources': selected}, [region])}[23]
+    assert finding.status == 'FAIL'
+    assert 'ros-cluster' in finding.evidence[0]
+
+
+def test_standalone_rds_deletion_protection_false_is_fail():
+    region = 'ap-northeast-1'
+    r = _record('rds', 'db-instance', region, 'ros-standalone',
+                deletion_protection=False)
+    f = {e.number: e for e in product_findings({'resources': [r]}, [region])}[23]
+    assert f.status == 'FAIL'
+
+
+def test_related_parent_vpc_and_snapshots_without_claiming_ownership():
+    region = 'ap-northeast-1'
+    resources = [
+        _record('ec2', 'instance', region, 'i-ros',
+                tags=[{'Key': 'Product', 'Value': 'ros'}],
+                vpc_id='vpc-shared', subnet_id='subnet-shared',
+                security_group_ids=['sg-shared']),
+        _record('ec2', 'vpc', region, 'vpc-shared', flow_logs=[]),
+        _record('ec2', 'subnet', region, 'subnet-shared', vpc_id='vpc-shared'),
+        _record('ec2', 'security-group', region, 'sg-shared'),
+        _record('ec2', 'ebs-volume', region, 'vol-linked',
+                tags=[{'Key': 'Project', 'Value': 'ros'}], encrypted=False),
+        _record('ec2', 'ebs-snapshot', region, 'snap-1', source_volume_id='vol-linked',
+                encrypted=False),
+        _record('rds', 'db-cluster', region, 'cluster-ros',
+                tags=[{'Key': 'Product', 'Value': 'ros'}], deletion_protection=True),
+        _record('rds', 'db-cluster-snapshot', region, 'cluster-snap-ros',
+                source_db_id='cluster-ros', encrypted=True),
+        _record('ec2', 'vpc', region, 'vpc-unrelated'),
+    ]
+    chosen, meta = attribute_resources(resources, 'ros')
+    by_id = {r['resource_id']: r for r in chosen}
+    assert set(by_id) == set(r['resource_id'] for r in resources) - {'vpc-unrelated'}
+    assert by_id['vpc-shared']['attribution'] == 'RELATED'
+    assert 'shared infrastructure' in by_id['vpc-shared']['attribution_evidence']
+    assert by_id['snap-1']['attribution'] == 'RELATED'
+    assert by_id['cluster-snap-ros']['attribution'] == 'RELATED'
+    assert meta['unassigned'] == 1
+
+
+def test_individual_s3_tag_permission_failure_is_recorded(monkeypatch):
+    import aws_security_audit.resource_scope as scope
+    from aws_security_audit.core import EvidenceUnavailable
+    class Ctx:
+        def client_cached(self, *args):
+            return object()
+
+    def api(client, operation, **kwargs):
+        if operation == 'list_buckets':
+            return {'Buckets': [{'Name': 'ros-prd'}]}
+        if operation == 'get_bucket_tagging':
+            raise EvidenceUnavailable('s3.get_bucket_tagging: AccessDenied')
+        if operation == 'get_bucket_encryption':
+            return {'ServerSideEncryptionConfiguration': {'Rules': [
+                {'ApplyServerSideEncryptionByDefault': {'SSEAlgorithm': 'AES256'}}]}}
+        if operation == 'get_public_access_block':
+            return {'PublicAccessBlockConfiguration': {'BlockPublicAcls': True}}
+        if operation == 'get_bucket_versioning':
+            return {'Status': 'Enabled'}
+        if operation == 'get_object_lock_configuration':
+            raise EvidenceUnavailable('s3.get_object_lock_configuration: ObjectLockConfigurationNotFoundError')
+        raise AssertionError(operation)
+
+    monkeypatch.setattr(scope, 'api_call', api)
+    out, errors = [], []
+    scope._add_s3(Ctx(), out, errors)
+    assert len(out) == 1 and len(errors) == 1
+    assert errors[0]['operation'] == 'get_bucket_tagging'
+    assert out[0]['tags'] == {}
+    assert out[0]['attributes']['default_encryption_algorithms'] == ['AES256']
+    assert out[0]['attributes']['bucket_public_access_block']['BlockPublicAcls'] is True
+    assert out[0]['attributes']['object_lock_enabled'] is None
+
+
+def test_product_deep_evidence_and_partial_observations_do_not_claim_pass():
+    from aws_security_audit.resource_scope import product_deep_evidence
+    region = 'ap-northeast-1'
+    resources = [
+        _record('ec2', 'security-group', region, 'sg-ros',
+                dangerous_ingress=0),
+        _record('ec2', 'ebs-volume', region, 'vol-ros',
+                encrypted=False, size_gib=30,
+                attached_instance_ids=['i-ros']),
+        _record('s3', 'bucket', 'global', 'ros-bucket',
+                default_encryption_algorithms=['AES256'],
+                versioning_status='Enabled'),
+    ]
+    packet = product_deep_evidence({'resources': resources}, [region])
+    assert packet[region]['5']['state'] == 'PARTIAL_OBSERVED'
+    assert packet[region]['19']['volumes'][0]['id'] == 'vol-ros'
+    findings = {f.number: f for f in product_findings({'resources': resources}, [region])}
+    assert findings[17].status == 'MANUAL_REVIEW'
+    assert any('AES256' in item for item in findings[17].evidence)
+    assert findings[19].status == 'FAIL'
+    assert findings[22].status == 'MANUAL_REVIEW'
+    assert findings[5].status == 'MANUAL_REVIEW'
