@@ -1,0 +1,183 @@
+"""Product-resource evidence matrix independent from compliance verdicts.
+
+A verified property on a selected resource is NOT proof of product-wide PASS.
+All rule outputs retain resource attribution and an explicit evidence limitation.
+No AWS API calls are made by this module.
+"""
+from __future__ import annotations
+
+from collections import Counter
+
+from .catalog import CHECKS
+
+
+PROPERTY_OK = 'PROPERTY_OK'
+PROPERTY_FAIL = 'PROPERTY_FAIL'
+PROPERTY_UNKNOWN = 'PROPERTY_UNKNOWN'
+CONTEXT_ONLY = 'CONTEXT_ONLY'
+KINDS = (PROPERTY_OK, PROPERTY_FAIL, PROPERTY_UNKNOWN, CONTEXT_ONLY)
+
+
+def build_product_observations(inventory: dict, regions: list[str]) -> dict:
+    rows = []
+
+    def add(number, resource, state, property_name, value, interpretation):
+        rows.append({
+            'number': number,
+            'control': CHECKS[number - 1].title,
+            'service': resource['service'],
+            'resource_type': resource['resource_type'],
+            'region': resource['region'],
+            'name': resource['name'],
+            'resource_id': resource['resource_id'],
+            'arn': resource.get('arn', ''),
+            'attribution': resource['attribution'],
+            'attribution_evidence': resource.get('attribution_evidence', ''),
+            'property': property_name,
+            'observed_value': value,
+            'property_result': state,
+            'interpretation': interpretation,
+            'scope_limit': 'Only this resource/property, not a complete product control PASS',
+        })
+
+    for r in inventory.get('resources', []):
+        kind = r['resource_type']
+        attrs = r['attributes']
+        direct = r['attribution'] == 'DIRECT'
+
+        if kind == 'db-instance':
+            value = attrs.get('publicly_accessible')
+            if isinstance(value, bool):
+                add(2, r, PROPERTY_FAIL if value else PROPERTY_OK,
+                    'PubliclyAccessible', value,
+                    'RDS public-access configuration; network reachability not proven')
+            if not attrs.get('cluster_id'):
+                value = attrs.get('deletion_protection')
+                if isinstance(value, bool):
+                    add(23, r, PROPERTY_FAIL if not value else PROPERTY_OK,
+                        'DeletionProtection', value,
+                        'Standalone RDS instance deletion protection')
+        if kind == 'db-cluster':
+            value = attrs.get('deletion_protection')
+            if isinstance(value, bool):
+                add(23, r, PROPERTY_FAIL if not value else PROPERTY_OK,
+                    'DeletionProtection', value,
+                    'DB cluster deletion protection; member availability is separate')
+
+        if kind == 'security-group':
+            count = attrs.get('dangerous_ingress')
+            if type(count) is int:
+                add(5, r, PROPERTY_FAIL if count > 0 else CONTEXT_ONLY,
+                    'dangerous_ingress_permission_count', count,
+                    'Selected inbound-rule heuristic; egress, role necessity and reachability unverified')
+
+        if kind == 'application':
+            web_acl = attrs.get('waf_web_acl_arn')
+            add(6, r, CONTEXT_ONLY, 'direct_alb_waf_web_acl_arn', web_acl,
+                'Direct ALB WAF association only; an upstream CloudFront WAF may exist')
+            for listener in attrs.get('listeners', []):
+                if listener.get('protocol') not in ('HTTPS', 'TLS'):
+                    continue
+                port = listener.get('port')
+                if (listener.get('ssl_protocol_evidence') == 'API_VERIFIED' and
+                        isinstance(listener.get('ssl_protocols'), list) and
+                        listener['ssl_protocols']):
+                    weak = listener.get('weak_ssl_protocols')
+                    if isinstance(weak, list) and weak:
+                        state = PROPERTY_FAIL
+                    elif isinstance(weak, list):
+                        state = PROPERTY_OK
+                    else:
+                        state = PROPERTY_UNKNOWN
+                else:
+                    state = PROPERTY_UNKNOWN
+                add(16, r, state, f'HTTPS listener {port} TLS protocol set',
+                    {'ssl_policy': listener.get('ssl_policy'),
+                     'protocols': listener.get('ssl_protocols'),
+                     'verification': listener.get('ssl_protocol_evidence')},
+                    'Frontend listener protocols only; backend/internal TLS not certified')
+            logs = attrs.get('access_logs', {})
+            if isinstance(logs, dict) and 'access_logs.s3.enabled' in logs:
+                add(29, r, CONTEXT_ONLY, 'ALB access logs configured',
+                    logs['access_logs.s3.enabled'],
+                    'ALB setting only; application logs and delivery not verified')
+
+        if kind == 'bucket':
+            algorithms = attrs.get('default_encryption_algorithms')
+            known = {'AES256', 'aws:kms', 'aws:kms:dsse'}
+            if isinstance(algorithms, list) and algorithms:
+                state = PROPERTY_OK if set(algorithms).issubset(known) else PROPERTY_UNKNOWN
+                add(17, r, state, 'default_encryption_algorithms', algorithms,
+                    'Bucket default encryption configuration, not every stored object')
+            bpa = attrs.get('bucket_public_access_block')
+            if isinstance(bpa, dict):
+                flags = ('BlockPublicAcls', 'IgnorePublicAcls',
+                         'BlockPublicPolicy', 'RestrictPublicBuckets')
+                state = (PROPERTY_OK if all(bpa.get(x) is True for x in flags)
+                         else CONTEXT_ONLY)
+                add(18, r, state, 'bucket_public_access_block', {k: bpa.get(k) for k in flags},
+                    'Bucket-level BPA only; account-level, policy and actual exposure unverified')
+            versioning = attrs.get('versioning_status')
+            lock = attrs.get('object_lock_enabled')
+            if versioning == 'Enabled' or lock is True:
+                state = PROPERTY_OK
+            elif versioning == 'Disabled' and lock is False:
+                state = PROPERTY_FAIL if direct else CONTEXT_ONLY
+            else:
+                state = PROPERTY_UNKNOWN
+            add(22, r, state, 'S3 versioning or Object Lock',
+                {'versioning': versioning, 'object_lock': lock},
+                'Selected bucket property only; lifecycle, retention and shared control unverified')
+
+        if kind in ('ebs-volume', 'ebs-snapshot'):
+            value = attrs.get('encrypted')
+            if type(value) is bool:
+                add(19, r, PROPERTY_FAIL if not value else PROPERTY_OK,
+                    'encrypted', value, 'Observed EBS resource encryption; backup coverage unverified')
+
+        if kind in ('db-instance', 'db-cluster', 'db-snapshot', 'db-cluster-snapshot'):
+            value = attrs.get('encrypted')
+            if type(value) is bool:
+                state = PROPERTY_FAIL if not value else PROPERTY_OK
+            else:
+                state = PROPERTY_UNKNOWN
+            add(20, r, state, 'effective storage encryption',
+                {'encrypted': value, 'encryption_state': attrs.get('encryption_state'),
+                 'storage_encryption_type': attrs.get('storage_encryption_type')},
+                'Observed RDS resource only; backup/restore scope unverified')
+
+        if kind in ('vpc', 'subnet'):
+            logs = attrs.get('flow_logs')
+            if isinstance(logs, list):
+                add(27, r, CONTEXT_ONLY, 'Flow Logs at resource scope', logs,
+                    'VPC/subnet configuration only; ENI or upstream/shared logging may exist')
+
+    summaries = {}
+    for definition in CHECKS:
+        matching = [r for r in rows if r['number'] == definition.number]
+        counts = Counter(r['property_result'] for r in matching)
+        summaries[str(definition.number)] = {
+            'control_number': definition.number,
+            'observed_resources': len(matching),
+            'ok': counts[PROPERTY_OK],
+            'fail': counts[PROPERTY_FAIL],
+            'unknown': counts[PROPERTY_UNKNOWN],
+            'context': counts[CONTEXT_ONLY],
+            'evidence_state': 'PARTIAL_RESOURCE_EVIDENCE' if matching else 'NO_RESOURCE_EVIDENCE',
+            'product_wide_pass_proven': False,
+        }
+    return {
+        'schema': 'aws-product-resource-observations-v1',
+        'regions_checked': regions,
+        'source': 'resource_inventory.attributes',
+        'rows': rows,
+        'by_control': summaries,
+        'limitations': [
+            'PROPERTY_OK means only a particular selected resource attribute meets a check, NOT product/account PASS.',
+            'PROPERTY_FAIL means a negative property is observed, not necessarily the full control failed without context.',
+            'CONTEXT_ONLY cannot be used as PASS or FAIL; PROPERTY_UNKNOWN is missing or conflicting evidence.',
+            'Attribution is heuristic; shared, untagged and omitted resources may exist.',
+            'Only a limited subset of 46 controls has attribute-level evaluations.',
+            'A property observation must not overwrite the original deterministic control verdict.',
+        ],
+    }
