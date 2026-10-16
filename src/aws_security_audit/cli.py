@@ -41,6 +41,8 @@ def parser() -> argparse.ArgumentParser:
         if name == 'assess':
             cmd.add_argument('--llm', choices=('off', 'export'), default='export',
                              help='Generate a JSON attachment and copy/paste prompt for ChatGPT/Gemini Web; no upload')
+            cmd.add_argument('--product', help='Restrict audit evidence to one product using Product/Project/Application/Service tags or Name/ID prefix')
+            cmd.add_argument('--product-tag', help='Explicit Key=Value selector (Product, Project, Application, Service or Name); requires --product')
     sub.add_parser('version', help='Show package version')
     return p
 
@@ -280,7 +282,30 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == 'policy-evidence':
             return policy_evidence(ctx, out=args.out)
         options = {'regions': regions, 'all_account_regions': ctx.active_regions(), 'ap_tag': args.ap_tag}
-        records = run_scan(ctx, regions, options)
+        inventory = None
+        if args.command == 'assess':
+            if args.product_tag and not args.product:
+                raise AuditError('--product-tag requires --product')
+            if args.product_tag:
+                key, sep, value = args.product_tag.partition('=')
+                if not sep or key not in ('Name', 'Product', 'Project', 'Application', 'Service') or not value:
+                    raise AuditError('Expected --product-tag Key=Value with an approved identity tag key')
+            if args.product and (len(args.product) > 128 or
+                                 any(c in args.product for c in '\\r\\n\\0')):
+                raise AuditError('Invalid product identifier')
+            from .resource_scope import collect_resource_inventory, product_findings
+            if args.product:
+                print(f'PRODUCT SCOPE: {args.product} (conservative matching; unassigned/shared resources are not PASS)', flush=True)
+                inventory = collect_resource_inventory(ctx, regions, args.product, args.product_tag)
+                records = product_findings(inventory, regions)
+                for item in records:
+                    if item.status == 'FAIL':
+                        print(f'{item.number:02d} {item.scope:20s} FAIL           product evidence only', flush=True)
+            else:
+                records = run_scan(ctx, regions, options)
+                inventory = collect_resource_inventory(ctx, regions)
+        else:
+            records = run_scan(ctx, regions, options)
         full_coverage = set(regions) == set(options['all_account_regions'])
         overview = overall_rows(records, coverage_full=full_coverage)
         counts = Counter(x['判定'] for x in overview)
@@ -289,17 +314,36 @@ def main(argv: list[str] | None = None) -> int:
             'role_arn': ctx.expected_role_arn, 'caller_arn': ctx.identity_arn,
             'requested_regions': regions, 'available_regions': options['all_account_regions'],
             'region_coverage_full': full_coverage,
+            'audit_scope': 'product' if args.command == 'assess' and args.product else 'account',
+            'product': args.product if args.command == 'assess' else None,
+            'product_selector': args.product_tag if args.command == 'assess' else None,
+            'product_attribution_complete': False if args.command == 'assess' and args.product else None,
             'session_policy': 'arn:aws:iam::aws:policy/ReadOnlyAccess',
             'note': 'No AWS resources were changed; manual/unknown statuses are not PASS.',
         }
         paths = export_report(args.out, records, metadata)
         if args.command == 'assess':
-            from .investigation import build_investigation, save_investigation
-            investigation = build_investigation(ctx, regions, overview, records)
-            paths.extend(save_investigation(args.out, investigation, llm_export=False))
+            from .resource_scope import save_resource_inventory
+            paths.extend(save_resource_inventory(args.out, inventory))
+            if args.product:
+                investigation = {
+                    'schema': 'aws-product-investigation-v1',
+                    'regions_checked': regions, 'deep_evidence': {},
+                    'limitations': [
+                        'Account-wide 46 checks are NOT reused for product verdicts.',
+                        'Only selected direct observations (#2/#5/#19/#20/#23) can assert FAIL.',
+                        'No PASS is inferred when untagged/shared/unrelated resources could exist.',
+                    ],
+                }
+                print('PRODUCT SCOPE: account-wide scanner skipped; all unproven control statuses remain MANUAL_REVIEW/UNKNOWN', flush=True)
+            else:
+                from .investigation import build_investigation, save_investigation
+                investigation = build_investigation(ctx, regions, overview, records)
+                paths.extend(save_investigation(args.out, investigation, llm_export=False))
             if args.llm == 'export':
                 from .web_handoff import build_web_review_bundle, save_web_handoff
-                bundle = build_web_review_bundle(metadata, overview, records, investigation)
+                bundle = build_web_review_bundle(metadata, overview, records, investigation,
+                                                 resource_inventory=inventory)
                 paths.extend(save_web_handoff(args.out, bundle))
                 print('WEB HANDOFF: attach aws_web_review_*.json to ChatGPT/Gemini Web and paste aws_web_prompt_*.md', flush=True)
                 print('SENSITIVE DATA NOTICE: inspect the attachment before uploading; it contains original finding evidence', flush=True)
