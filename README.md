@@ -152,7 +152,7 @@ uv run --locked --no-sync aws-security-audit assess \
 
 This runs the existing 46 checks and supplemental inspection for #5 (dangerous security-group ingress with ENI attachment) and #19 (unencrypted EBS with EC2/ASG context and default encryption state). The original judgments are **never silently changed** based on LLM speculation.
 
-`--llm export` creates a **local, aggregate, redacted Markdown packet** for manual review; it does not call an LLM or send evidence anywhere. Use `--llm off` to skip packet creation. The local JSON investigation report includes resource IDs and is protected by 0600 permissions on POSIX.
+`--llm export` creates a **single JSON evidence attachment** (`aws_web_review_*.json`) and **a separate Markdown prompt** (`aws_web_prompt_*.md`) for manual browser use in ChatGPT Web or Gemini Web. The operator pastes the prompt and attaches the JSON file; the program **never calls an LLM or transmits evidence**. The JSON contains all 46 original outcomes and findings plus #5/#19 deep investigation. Use `--llm off` to skip Web handoff. Local investigation and Web-review JSON may contain sensitive AWS resource IDs or names; inspect before manual external upload. All output uses 0600 file permissions on POSIX.
 
 This is **investigation only**: no AWS IAM, networking, EBS, EC2, logging, or Security Hub configuration changes; no automated remediation; no active probing. Any claim of effective IAM No-Write remains **NOT PROVEN**, regardless of session policy. The full operating contract and limitations are in [docs/INVESTIGATION_ONLY.md](docs/INVESTIGATION_ONLY.md).
 
