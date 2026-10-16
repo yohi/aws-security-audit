@@ -4,7 +4,7 @@ Status: **Draft / investigation-only / no AWS writes** (2026-10-16 JST). Related
 
 ## Triggering observation
 
-A real offline ROS evidence review from account `456720798575` (Tokyo region, 2026-10-16) showed **#19 FAIL** (3 unencrypted 30-GiB EBS volumes), and an **incorrect product-scoped #23 FAIL** because four Aurora member instances reported `DeletionProtection=false` even though both corresponding Aurora clusters reported `DeletionProtection=true`. The 46-control product report originally had 44 MANUAL_REVIEW and 0 PASS. The observation is a point-in-time sample, **not proof of product-wide or account-wide compliance**.
+An offline product-scope evidence review (2026-10-16) exposed a **#19 FAIL** with confirmed unencrypted attached volumes, and a **potentially incorrect product-scoped #23 FAIL** because Aurora member instances reported `DeletionProtection=false` while their corresponding Aurora clusters reported `DeletionProtection=true`. The 46-control product report originally had 44 MANUAL_REVIEW and 0 PASS. The observation is a point-in-time sample, **not proof of product-wide or account-wide compliance**.
 
 Do not use this repository to change those AWS resource settings. This work changes only offline report schema and allowed read-only calls.
 
