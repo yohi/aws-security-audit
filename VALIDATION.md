@@ -26,3 +26,12 @@
 ## PR #1 review F-001–005 limited correction
 
 All five findings accepted. Added offline regressions for failed/missing CloudTrail delivery, limited Data selectors, Flow Logs failed/unknown/successful delivery and per-subnet coverage, Security Hub READY/all-disabled, partial region summary, unmatched AP tag, AssumeRole failure and STS expiry. No AWS account was accessed; effective read-only IAM authorization is NOT PROVEN and remains a separate gate.
+
+## STS-001 review response, 2026-10-16
+
+- STS2-001: credential-source `get_credentials().method` checked before STS; login/SSO only.
+- STS2-002: doctor separately reports identity, region discovery, sampled API reads; never claims No-Write.
+- STS2-003: scope, explicit Deny review requirement, resource-policy exceptions, simulation limitations, version invalidation documented.
+- STS2-004: direct dependency pins and read-only policy version + canonical SHA-256 evidence; transitive uvx hash assurance still OPEN.
+- STS2-005: offline regression tests for static source mixing, account/role mismatches, invalid region, AssumeRole failure and doctor failure.
+- AWS environment and effective IAM authorization **NOT PROVEN**.
