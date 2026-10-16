@@ -94,3 +94,11 @@ A fixed Git commit SHA is recommended for reproducibility. `uvx --from git+ssh` 
 - F-004: partial regions preserve regional findings but prevent account-wide PASS, including CSV/XLSX/JSON summaries.
 - F-005: zero AP tag matches while active EC2 instances exist returns MANUAL_REVIEW instead of NOT_APPLICABLE.
 - Static regression tests do not replace actual AWS integration or independent proof of effective IAM write restrictions.
+
+## STS-001 security review correction
+
+The SDK's **active** credential provider is verified before STS. Profiles with `login_session` but overridden by static shared credentials, environment credentials or other providers are rejected, without reading or logging secret values.
+
+`doctor` distinguishes `IDENTITY_VERIFIED`, `REGION_VERIFIED` and `READ_API_VERIFIED` for sampled IAM, S3, EC2, CloudTrail and RDS operations. Its success does **not** establish all 46 permissions or no-write authorization. It always reports `EFFECTIVE_NO_WRITE=NOT_PROVEN`. `policy-evidence` reads the actual AWS-managed ReadOnlyAccess default version and returns a canonical JSON SHA-256, without editing AWS policies.
+
+See [STS-001 No-Write verification contract](docs/STS001_NO_WRITE_CONTRACT.md). Runtime direct packages are version-pinned; transitive artifact hashes and `uvx git+ssh` consumer reproducibility remain open. AWS integration: NOT TESTED; IAM effective No-Write: NOT PROVEN; production approval: NOT GRANTED.
