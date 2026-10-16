@@ -295,7 +295,7 @@ def test_individual_s3_tag_permission_failure_is_recorded(monkeypatch):
     assert out[0]['tags'] == {}
     assert out[0]['attributes']['default_encryption_algorithms'] == ['AES256']
     assert out[0]['attributes']['bucket_public_access_block']['BlockPublicAcls'] is True
-    assert out[0]['attributes']['object_lock_enabled'] is None
+    assert out[0]['attributes']['object_lock_enabled'] is False
 
 
 def test_product_deep_evidence_and_partial_observations_do_not_claim_pass():
@@ -480,3 +480,193 @@ def test_rds_snapshot_uncertainty_is_not_product_fail():
     assert not any('encrypted=False' in x for x in finding.evidence)
     assert any('UNVERIFIED_ENCRYPTION_TYPE' in x for x in finding.evidence)
     assert any('CONFLICTING_EVIDENCE' in x for x in finding.evidence)
+
+
+def test_sg_rules_are_structured_identifiers_without_descriptions():
+    from aws_security_audit.resource_scope import _sg_rule_evidence
+    rules = [{
+        'IpProtocol': 'tcp', 'FromPort': 443, 'ToPort': 443,
+        'IpRanges': [{'CidrIp': '0.0.0.0/0', 'Description': 'potential-secret'}],
+        'Ipv6Ranges': [{'CidrIpv6': '::/0', 'Description': 'sensitive'}],
+        'UserIdGroupPairs': [{'GroupId': 'sg-123', 'Description': 'internal note'}],
+    }]
+    observed = _sg_rule_evidence(rules)
+    assert observed == [{
+        'protocol': 'tcp', 'from_port': 443, 'to_port': 443,
+        'ipv4_cidrs': ['0.0.0.0/0'], 'ipv6_cidrs': ['::/0'],
+        'referenced_sg_ids': ['sg-123'], 'prefix_list_ids': [],
+    }]
+
+
+def test_elb_ssl_policy_probed_and_cannot_infer_pass_from_policy_name(monkeypatch):
+    from aws_security_audit.core import EvidenceUnavailable
+    import aws_security_audit.resource_scope as scope
+
+    class Ctx:
+        def client_cached(self, *args):
+            return object()
+
+    arn = 'arn:aws:elasticloadbalancing:ap-northeast-1:123456789012:loadbalancer/app/ros-alb/abc'
+    lbs = [
+        {'LoadBalancerArn': arn, 'LoadBalancerName': 'ros-alb', 'Type': 'application',
+         'Scheme': 'internet-facing'},
+    ]
+    operations = []
+    def fake_paged(client, operation, result_key, **kwargs):
+        operations.append(operation)
+        if operation == 'describe_load_balancers':
+            return lbs
+        if operation == 'describe_listeners':
+            return [
+                {'Protocol': 'HTTPS', 'Port': 443, 'SslPolicy': 'ELBSecurityPolicy-2016-08'},
+                {'Protocol': 'HTTP', 'Port': 80},
+            ]
+        raise AssertionError(operation)
+
+    def fake_api(client, operation, **kwargs):
+        operations.append(operation)
+        if operation == 'describe_tags':
+            return {'TagDescriptions': [{'ResourceArn': arn, 'Tags': [
+                {'Key': 'Product', 'Value': 'ros'},
+            ]}]}
+        if operation == 'describe_load_balancer_attributes':
+            return {'Attributes': []}
+        if operation == 'describe_ssl_policies':
+            assert kwargs['Names'] == ['ELBSecurityPolicy-2016-08']
+            return {'SslPolicies': [{
+                'Name': 'ELBSecurityPolicy-2016-08',
+                'SslProtocols': ['TLSv1', 'TLSv1.1', 'TLSv1.2'],
+            }]}
+        if operation == 'get_web_acl_for_resource':
+            return {'WebACL': None}
+        raise AssertionError(operation)
+
+    monkeypatch.setattr(scope, 'paged', fake_paged)
+    monkeypatch.setattr(scope, 'api_call', fake_api)
+    resources, errors = [], []
+    scope._add_elb(Ctx(), 'ap-northeast-1', resources, errors)
+    assert errors == []
+    assert len(resources) == 1
+    assert resources[0]['attributes']['listeners'][0]['weak_ssl_protocols'] == ['TLSv1', 'TLSv1.1']
+    selected, _ = attribute_resources(resources, 'ros')
+    finding = {f.number: f for f in product_findings({'resources': selected}, ['ap-northeast-1'])}[16]
+    assert finding.status == 'FAIL'
+    assert any('source=elbv2.describe_ssl_policies' in e for e in finding.evidence)
+    assert 'describe_ssl_policies' in operations
+
+
+def test_tls_only_known_weak_protocol_from_aws_can_raise_fail():
+    region = 'ap-northeast-1'
+    resources = [
+        _record('elbv2', 'application', region, 'ros-api',
+                tags=[{'Key': 'Product', 'Value': 'ros'}],
+                listeners=[{'protocol': 'HTTPS', 'port': 443,
+                            'ssl_policy': 'custom', 'ssl_protocols': ['TLSv1.2'],
+                            'weak_ssl_protocols': []}]),
+        _record('elbv2', 'application', region, 'ros-unknown',
+                tags=[{'Key': 'Product', 'Value': 'ros'}],
+                listeners=[{'protocol': 'HTTPS', 'port': 443,
+                            'ssl_policy': 'unverified',
+                            'weak_ssl_protocols': None}]),
+        _record('elbv2', 'application', region, 'ros-shared',
+                listeners=[{'protocol': 'HTTPS', 'port': 443,
+                            'ssl_policy': 'legacy', 'ssl_protocols': ['TLSv1'],
+                            'weak_ssl_protocols': ['TLSv1']}]),
+    ]
+    chosen, _ = attribute_resources(resources, 'ros')
+    assert len(chosen) == 2
+    finding = {f.number: f for f in product_findings({'resources': chosen}, [region])}[16]
+    assert finding.status == 'MANUAL_REVIEW'
+    assert not any('source=elbv2.describe_ssl_policies' in e for e in finding.evidence)
+
+
+def test_elb_ssl_policy_error_is_explicit_and_does_not_mark_fail(monkeypatch):
+    from aws_security_audit.core import EvidenceUnavailable
+    import aws_security_audit.resource_scope as scope
+    class Ctx:
+        def client_cached(self, *args):
+            return object()
+
+    arn = 'arn:aws:elasticloadbalancing:ap-northeast-1:123456789012:loadbalancer/app/ros-api/abc'
+    def fake_paged(client, operation, result_key, **kwargs):
+        if operation == 'describe_load_balancers':
+            return [{'LoadBalancerArn': arn, 'LoadBalancerName': 'ros-api',
+                     'Type': 'application', 'Scheme': 'internet-facing'}]
+        if operation == 'describe_listeners':
+            return [{'Protocol': 'HTTPS', 'Port': 443, 'SslPolicy': 'custom'}]
+        raise AssertionError(operation)
+
+    def fake_api(client, operation, **kwargs):
+        if operation == 'describe_tags':
+            return {'TagDescriptions': [{'ResourceArn': arn, 'Tags': [
+                {'Key': 'Product', 'Value': 'ros'},
+            ]}]}
+        if operation == 'describe_load_balancer_attributes':
+            return {'Attributes': []}
+        if operation == 'describe_ssl_policies':
+            raise EvidenceUnavailable('elbv2.describe_ssl_policies: AccessDenied')
+        if operation == 'get_web_acl_for_resource':
+            return {'WebACL': None}
+        raise AssertionError(operation)
+
+    monkeypatch.setattr(scope, 'paged', fake_paged)
+    monkeypatch.setattr(scope, 'api_call', fake_api)
+    records, errors = [], []
+    scope._add_elb(Ctx(), 'ap-northeast-1', records, errors)
+    assert len(errors) == 1
+    assert errors[0]['operation'] == 'describe_ssl_policies'
+    assert records[0]['attributes']['listeners'][0]['ssl_protocol_evidence'] == 'UNVERIFIED'
+    chosen, _ = attribute_resources(records, 'ros')
+    assert {f.number: f for f in product_findings({'resources': chosen}, ['ap-northeast-1'])}[16].status == 'MANUAL_REVIEW'
+
+
+def test_versioning_and_object_lock_proof_is_bucket_scoped():
+    region = 'ap-northeast-1'
+    resources = [
+        _record('s3', 'bucket', 'global', 'ros-logs',
+                tags=[{'Key': 'Product', 'Value': 'ros'}],
+                versioning_status='Disabled', object_lock_enabled=False),
+        _record('s3', 'bucket', 'global', 'ros-missing-evidence',
+                tags=[{'Key': 'Product', 'Value': 'ros'}],
+                versioning_status='Disabled', object_lock_enabled=None),
+        _record('s3', 'bucket', 'global', 'other-unprotected',
+                tags=[{'Key': 'Product', 'Value': 'other'}],
+                versioning_status='Disabled', object_lock_enabled=False),
+    ]
+    selected, _ = attribute_resources(resources, 'ros')
+    finding = {f.number: f for f in product_findings({'resources': selected}, [region])}[22]
+    assert finding.status == 'FAIL'
+    assert len([x for x in finding.evidence if 'object_lock_enabled=False' in x]) == 1
+    assert 'ros-logs' in finding.evidence[0]
+    resources[0]['attributes']['object_lock_enabled'] = None
+    finding = {f.number: f for f in product_findings({'resources': selected}, [region])}[22]
+    assert finding.status == 'MANUAL_REVIEW'
+
+
+def test_s3_bucket_object_lock_configuration_not_found_is_false_only_on_known_error(monkeypatch):
+    import aws_security_audit.resource_scope as scope
+    from aws_security_audit.core import EvidenceUnavailable
+    class Ctx:
+        def client_cached(self, *args):
+            return object()
+    def fake_api(client, operation, **kwargs):
+        if operation == 'list_buckets':
+            return {'Buckets': [{'Name': 'ros-logs'}]}
+        if operation == 'get_bucket_tagging':
+            return {'TagSet': [{'Key': 'Product', 'Value': 'ros'}]}
+        if operation == 'get_bucket_encryption':
+            return {'ServerSideEncryptionConfiguration': {'Rules': []}}
+        if operation == 'get_public_access_block':
+            return {'PublicAccessBlockConfiguration': {}}
+        if operation == 'get_bucket_versioning':
+            return {}
+        if operation == 'get_object_lock_configuration':
+            raise EvidenceUnavailable('s3.get_object_lock_configuration: AccessDenied')
+        raise AssertionError(operation)
+    monkeypatch.setattr(scope, 'api_call', fake_api)
+    out, errors = [], []
+    scope._add_s3(Ctx(), out, errors)
+    assert len(errors) == 1
+    assert 'object_lock_enabled' not in out[0]['attributes']
+    finding = {f.number: f for f in product_findings({'resources': out}, ['ap-northeast-1'])}[22]
+    assert finding.status == 'MANUAL_REVIEW'
