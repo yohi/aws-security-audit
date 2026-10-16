@@ -354,3 +354,129 @@ def test_product_snapshots_are_assessed_without_fabricated_pass():
     assert 'snap-1' in results[19].evidence[0]
     assert results[20].status == 'FAIL'
     assert 'db-snap-1' in results[20].evidence[0]
+
+
+
+def test_rds_snapshot_collection_reads_distinct_encryption_flags(monkeypatch):
+    """Regression: DB-cluster-snapshot does not use DB-snapshot Encrypted key."""
+    import aws_security_audit.resource_scope as scope
+
+    region = 'ap-northeast-1'
+    class Ctx:
+        def client_cached(self, *args):
+            return object()
+
+    snapshots = {
+        'describe_db_instances': [],
+        'describe_db_clusters': [],
+        'describe_db_snapshots': [
+            {'DBSnapshotIdentifier': 'instance-kms', 'DBInstanceIdentifier': 'db',
+             'Encrypted': True, 'StorageEncryptionType': 'sse-kms'},
+            {'DBSnapshotIdentifier': 'instance-none', 'DBInstanceIdentifier': 'db',
+             'Encrypted': False, 'StorageEncryptionType': 'none'},
+            {'DBSnapshotIdentifier': 'instance-owned', 'DBInstanceIdentifier': 'db',
+             'Encrypted': False, 'StorageEncryptionType': 'sse-rds'},
+        ],
+        'describe_db_cluster_snapshots': [
+            {'DBClusterSnapshotIdentifier': 'cluster-owned', 'DBClusterIdentifier': 'cluster',
+             'StorageEncrypted': False, 'StorageEncryptionType': 'sse-rds',
+             'Encrypted': False},
+            {'DBClusterSnapshotIdentifier': 'cluster-kms', 'DBClusterIdentifier': 'cluster',
+             'StorageEncrypted': True, 'StorageEncryptionType': 'sse-kms'},
+            {'DBClusterSnapshotIdentifier': 'cluster-none', 'DBClusterIdentifier': 'cluster',
+             'StorageEncrypted': False, 'StorageEncryptionType': 'none'},
+            {'DBClusterSnapshotIdentifier': 'cluster-unknown', 'DBClusterIdentifier': 'cluster',
+             'StorageEncrypted': False},
+            {'DBClusterSnapshotIdentifier': 'cluster-conflict', 'DBClusterIdentifier': 'cluster',
+             'StorageEncrypted': True, 'StorageEncryptionType': 'none'},
+            {'DBClusterSnapshotIdentifier': 'cluster-unknown-mode', 'DBClusterIdentifier': 'cluster',
+             'StorageEncrypted': False, 'StorageEncryptionType': 'new-unknown-value'},
+        ],
+    }
+
+    def fake_paged(client, operation, result_key, **kwargs):
+        assert operation in snapshots
+        return snapshots[operation]
+
+    monkeypatch.setattr(scope, 'paged', fake_paged)
+    records, errors = [], []
+    scope._add_rds(Ctx(), region, records, errors)
+    assert errors == []
+    assert len(records) == 9
+    by_id = {r['resource_id']: r['attributes'] for r in records}
+    assert by_id['instance-kms']['encrypted'] is True
+    assert by_id['instance-kms']['encryption_flag_field'] == 'Encrypted'
+    assert by_id['instance-none']['encrypted'] is False
+    assert by_id['instance-owned']['encrypted'] is True
+    assert by_id['cluster-owned']['encrypted'] is True
+    assert by_id['cluster-owned']['encryption_state'] == 'ENCRYPTED'
+    assert by_id['cluster-owned']['encryption_flag'] is False
+    assert by_id['cluster-owned']['encryption_flag_field'] == 'StorageEncrypted'
+    assert by_id['cluster-kms']['encrypted'] is True
+    assert by_id['cluster-none']['encrypted'] is False
+    assert by_id['cluster-unknown']['encrypted'] is None
+    assert by_id['cluster-unknown']['encryption_state'] == 'UNVERIFIED_ENCRYPTION_TYPE'
+    assert by_id['cluster-conflict']['encrypted'] is None
+    assert by_id['cluster-conflict']['encryption_state'] == 'CONFLICTING_EVIDENCE'
+    assert by_id['cluster-unknown-mode']['encrypted'] is None
+    findings = {f.number: f for f in product_findings({'resources': records}, [region])}
+    assert findings[20].status == 'FAIL'
+    assert sum('encrypted=False' in line for line in findings[20].evidence) == 2
+    assert 'instance-none' in findings[20].evidence[0]
+    assert 'cluster-none' in findings[20].evidence[1]
+    assert any('storage_encryption_type' in item and 'sse-rds' in item
+               for item in findings[20].evidence)
+
+
+def test_rds_encryption_mode_prevents_false_positive_with_missing_fields():
+    from aws_security_audit.resource_scope import _rds_encryption_observation
+    scenarios = [
+        ({'StorageEncrypted': False, 'StorageEncryptionType': 'sse-rds'},
+         True, 'ENCRYPTED'),
+        ({'StorageEncrypted': True, 'StorageEncryptionType': 'sse-kms'},
+         True, 'ENCRYPTED'),
+        ({'StorageEncrypted': False, 'StorageEncryptionType': 'none'},
+         False, 'NOT_ENCRYPTED'),
+        ({'StorageEncrypted': False}, None, 'UNVERIFIED_ENCRYPTION_TYPE'),
+        ({}, None, 'UNVERIFIED_ENCRYPTION_TYPE'),
+        ({'StorageEncrypted': True}, True, 'ENCRYPTED_LEGACY_FLAG'),
+        ({'StorageEncrypted': True, 'StorageEncryptionType': 'none'},
+         None, 'CONFLICTING_EVIDENCE'),
+        ({'StorageEncrypted': False, 'StorageEncryptionType': 'sse-kms'},
+         None, 'CONFLICTING_EVIDENCE'),
+        ({'StorageEncrypted': False, 'StorageEncryptionType': 'unrecognized'},
+         None, 'UNVERIFIED_ENCRYPTION_TYPE'),
+    ]
+    for metadata, expected, state in scenarios:
+        evidence = _rds_encryption_observation(metadata, 'StorageEncrypted')
+        assert evidence['encrypted'] is expected, metadata
+        assert evidence['encryption_state'] == state, metadata
+        assert evidence['storage_encryption_type'] == metadata.get('StorageEncryptionType')
+
+    assert _rds_encryption_observation(
+        {'Encrypted': False, 'StorageEncryptionType': 'sse-rds'},
+        'Encrypted')['encrypted'] is True
+
+
+def test_rds_snapshot_uncertainty_is_not_product_fail():
+    from aws_security_audit.resource_scope import _rds_encryption_observation
+    region = 'ap-northeast-1'
+    records = [
+        _record('rds', 'db-cluster-snapshot', region, f'snap-{i}', **fields)
+        for i, fields in enumerate([
+            _rds_encryption_observation(
+                {'StorageEncrypted': False, 'StorageEncryptionType': 'sse-rds'},
+                'StorageEncrypted'),
+            _rds_encryption_observation(
+                {'StorageEncrypted': False},
+                'StorageEncrypted'),
+            _rds_encryption_observation(
+                {'StorageEncrypted': True, 'StorageEncryptionType': 'none'},
+                'StorageEncrypted'),
+        ])
+    ]
+    finding = {f.number: f for f in product_findings({'resources': records}, [region])}[20]
+    assert finding.status == 'MANUAL_REVIEW'
+    assert not any('encrypted=False' in x for x in finding.evidence)
+    assert any('UNVERIFIED_ENCRYPTION_TYPE' in x for x in finding.evidence)
+    assert any('CONFLICTING_EVIDENCE' in x for x in finding.evidence)
