@@ -23,14 +23,16 @@ uv run --locked --no-sync aws-security-audit assess \
   --out ./reports
 ```
 
-`--llm export` is the default, and writes a **privacy-reduced local Markdown review packet only**. `--llm off` disables even that packet. Neither calls any AI API. Restrict access to both output files and any manually uploaded files as security-sensitive material.
+`--llm export` is the default and generates a **single evidence-rich JSON attachment plus a separate Markdown prompt** for manual use in ChatGPT Web or Gemini Web. It does not call an LLM API, upload files, or send data to an AI service. `--llm off` disables these two handoff files. Restrict access to private local files and explicitly review the attachment before manually uploading it: the JSON contains original finding evidence, resource IDs, and potentially sensitive names. The program cannot guarantee that arbitrary source evidence is anonymized.
 
 `--regions all` targets all enabled account regions. A single STS session lasts one hour and is not refreshed automatically. Expired credentials cause `UNKNOWN` or failure; never use a fallback identity. If only `--regions ap-northeast-1` is requested, account-wide PASS remains withheld.
 
 Outputs:
 - Existing 46-control JSON/CSV/XLSX summaries, unchanged.
 - `aws_investigation_*.json`: additional per-region observations for controls #5 and #19; resource IDs are present and file permission is 0600 on POSIX.
-- `aws_llm_review_*.md`: aggregate, resource-ID-free offline LLM review handoff, also 0600.
+- `aws_web_review_*.json`: **one manually uploadable file** containing all 46 original outcomes, per-region evidence, and supplemental #5/#19 investigation; potentially sensitive, mode 0600.
+- `aws_web_prompt_*.md`: **copy/paste prompt** for ChatGPT Web / Gemini Web explicitly restricting analysis to evidence assessment and forbidding remediation; mode 0600.
+- The earlier aggregated-only Markdown packet is no longer the default output of `assess`.
 
 ## Supplemental investigation rules
 
@@ -48,13 +50,13 @@ Retain the existing scanner's original judgments and evidence. No claim is made 
 
 ## LLM review contract
 
-If the operator separately gives the Markdown packet to an LLM, that LLM may summarize observations, uncertainty, risk, and evidence gaps. It must not:
+The user manually attaches `aws_web_review_*.json` to ChatGPT Web or Gemini Web and pastes the content of `aws_web_prompt_*.md` into the browser chat. The LLM may summarize observations, uncertainty, risk, and evidence gaps. It must not:
 - make up API evidence or remove account-wide partial-region restrictions;
 - elevate incomplete evidence to PASS;
 - recommend or trigger resource configuration changes as part of this assignment;
 - claim the model itself proved IAM effective No-Write.
 
-LLM judgments are **advisory annotations**, never changes to original machine statuses.
+LLM judgments are **advisory annotations**, never changes to original machine statuses. No remediation advice, AWS modifications, or infrastructure configuration improvements belong to this workflow.
 
 ## Verification
 
