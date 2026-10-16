@@ -274,7 +274,10 @@ def build_product_observations(inventory: dict, regions: list[str]) -> dict:
             'context': counts[CONTEXT_ONLY],
             'evidence_state': (
                 'NO_RESOURCE_EVIDENCE' if not matching
-                else 'SHARED_CONTEXT_ONLY' if shared_count == len(matching)
+                else (
+                    'SHARED_EVIDENCE_UNVERIFIED' if counts[PROPERTY_UNKNOWN] > 0
+                    else 'SHARED_CONTEXT_ONLY'
+                ) if shared_count == len(matching)
                 else 'PARTIAL_RESOURCE_EVIDENCE'
             ),
             'shared_context_count': shared_count,
