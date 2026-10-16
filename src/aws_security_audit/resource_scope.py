@@ -653,7 +653,9 @@ def product_findings(inventory, regions):
                     for r in region_items
                     if r['resource_type'] == 'application' and r['attribution'] == 'DIRECT'
                     for listener in r['attributes'].get('listeners', [])
-                    if listener.get('protocol') == 'HTTPS' and listener.get('weak_ssl_protocols')
+                    if listener.get('protocol') == 'HTTPS'
+                    and listener.get('ssl_protocol_evidence') == 'API_VERIFIED'
+                    and listener.get('weak_ssl_protocols')
                 ]
                 if weak_listeners:
                     status = 'FAIL'
