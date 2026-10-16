@@ -73,7 +73,9 @@ def build_web_review_bundle(metadata: dict, rows: list[dict], findings: list, in
         },
         'evidence_limitations': [
             'The original findings may contain capped lists; absence from evidence is not proof of absence.',
-            'Extra deterministic investigation for account scope currently exists for controls #5 and #19 only.',
+            'Full account-scope deterministic investigation exists for controls #5 and #19; product-scope observations are PARTIAL_OBSERVED and not equivalent.',
+            'For product scope, individual collection_errors may indicate failed tag/config reads. Empty tags do not prove absence of ownership.',
+            'Aurora deletion protection applies to DB clusters; member instances can still be deleted, affecting availability.',
             'Product scope uses conservative identity evidence; shared/untagged services and inherited resources may be omitted.',
             'All other 44 controls retain their original scanner evidence limitations.',
             'Partial-region results can never establish account-wide PASS.',
@@ -112,7 +114,9 @@ WEB_REVIEW_PROMPT = """あなたはAWSセキュリティ監査の独立した調
 3. 各FAILについて、観測された設定とセキュリティ上の影響を分けて評価し、
    実際に証明されたこと／未証明のこと／誤検知の可能性を区別する。
 4. UNKNOWN・MANUAL_REVIEWの項目について、不足証拠と自動判定不能の理由を整理する。
-5. 追加証拠のある#5と#19について、元の監査判定と詳細証拠の整合性を検証する。
+5. #5/#19について、account scopeの詳細証拠とproduct scopeのPARTIAL_OBSERVEDを明確に区別する。未収集のSGアウトバウンド/スナップショット等はUNKNOWNとして扱う。
+   #23はAuroraクラスターのDeletionProtectionとメンバーDBインスタンスの可用性保護を混同せず、両者の証拠を分けて評価する。
+   resource_inventory.collection_errorsを確認し、タグ・属性の未取得と設定なしを区別する。
 6. 重要度の高い検出事項を調査上の優先度で分類する。ただし改善案や是正手順は出さない。
 
 【出力】
