@@ -73,12 +73,34 @@ def _add_ec2(ctx, region, out, errors):
                            encrypted=vol.get('Encrypted'), size_gib=vol.get('Size'),
                            attached_instance_ids=[a['InstanceId'] for a in vol.get('Attachments', [])
                                                   if a.get('InstanceId')]))
+    try:
+        flow_logs = paged(ec2, 'describe_flow_logs', 'FlowLogs')
+    except EvidenceUnavailable as exc:
+        errors.append({'region': region, 'service': 'ec2',
+                       'operation': 'describe_flow_logs', 'reason': str(exc)[:180]})
+        flow_logs = []
     for vpc in paged(ec2, 'describe_vpcs', 'Vpcs'):
+        linked_logs = [log for log in flow_logs if log.get('ResourceId') == vpc['VpcId']]
         out.append(_record('ec2', 'vpc', region, vpc['VpcId'], tags=vpc.get('Tags'),
-                           cidr_block=vpc.get('CidrBlock')))
+                           cidr_block=vpc.get('CidrBlock'),
+                           flow_logs=[{'id': log.get('FlowLogId'), 'status': log.get('FlowLogStatus'),
+                                       'delivery_status': log.get('DeliverLogsStatus')}
+                                      for log in linked_logs]))
     for subnet in paged(ec2, 'describe_subnets', 'Subnets'):
         out.append(_record('ec2', 'subnet', region, subnet['SubnetId'], tags=subnet.get('Tags'),
                            vpc_id=subnet.get('VpcId'), cidr_block=subnet.get('CidrBlock')))
+    # DescribeSnapshots exposes VolumeId only for known snapshots; an absent
+    # linkage is not proof that no backup belongs to the product.
+    try:
+        snapshots = paged(ec2, 'describe_snapshots', 'Snapshots', OwnerIds=['self'])
+        for snap in snapshots:
+            out.append(_record('ec2', 'ebs-snapshot', region, snap['SnapshotId'],
+                               tags=snap.get('Tags'), encrypted=snap.get('Encrypted'),
+                               source_volume_id=snap.get('VolumeId'),
+                               volume_size_gib=snap.get('VolumeSize')))
+    except EvidenceUnavailable as exc:
+        errors.append({'region': region, 'service': 'ec2',
+                       'operation': 'describe_snapshots', 'reason': str(exc)[:180})
 
 
 def _add_rds(ctx, region, out, errors):
@@ -92,7 +114,9 @@ def _add_rds(ctx, region, out, errors):
                            arn=arn, tags=tags, encrypted=db.get('StorageEncrypted'),
                            publicly_accessible=db.get('PubliclyAccessible'),
                            deletion_protection=db.get('DeletionProtection'),
-                           cluster_id=db.get('DBClusterIdentifier'), engine=db.get('Engine')))
+                           cluster_id=db.get('DBClusterIdentifier'), engine=db.get('Engine'),
+                           security_group_ids=[g.get('VpcSecurityGroupId')
+                                               for g in db.get('VpcSecurityGroups', [])]))
     for db in paged(rds, 'describe_db_clusters', 'DBClusters'):
         arn = db.get('DBClusterArn', '')
         tags = db.get('TagList')
@@ -100,7 +124,26 @@ def _add_rds(ctx, region, out, errors):
             tags = _tagged(ctx, 'rds', region, arn)
         out.append(_record('rds', 'db-cluster', region, db['DBClusterIdentifier'],
                            arn=arn, tags=tags, encrypted=db.get('StorageEncrypted'),
-                           deletion_protection=db.get('DeletionProtection'), engine=db.get('Engine')))
+                           deletion_protection=db.get('DeletionProtection'), engine=db.get('Engine'),
+                           security_group_ids=[g.get('VpcSecurityGroupId')
+                                               for g in db.get('VpcSecurityGroups', [])]))
+    for operation, collection, kind, id_field, parent_field in (
+        ('describe_db_snapshots', 'DBSnapshots', 'db-snapshot', 'DBSnapshotIdentifier', 'DBInstanceIdentifier'),
+        ('describe_db_cluster_snapshots', 'DBClusterSnapshots', 'db-cluster-snapshot',
+         'DBClusterSnapshotIdentifier', 'DBClusterIdentifier'),
+    ):
+        try:
+            snapshots = paged(rds, operation, collection)
+            for snap in snapshots:
+                out.append(_record('rds', kind, region, snap[id_field],
+                                   arn=snap.get('DBSnapshotArn', '') or snap.get('DBClusterSnapshotArn', ''),
+                                   tags=snap.get('TagList'),
+                                   source_db_id=snap.get(parent_field),
+                                   encrypted=snap.get('Encrypted'),
+                                   snapshot_type=snap.get('SnapshotType')))
+        except EvidenceUnavailable as exc:
+            errors.append({'region': region, 'service': 'rds',
+                           'operation': operation, 'reason': str(exc)[:180]})
 
 
 def _add_elb(ctx, region, out, errors):
@@ -123,11 +166,43 @@ def _add_elb(ctx, region, out, errors):
                                'reason': str(exc)[:180]})
     for lb in lbs:
         arn = lb['LoadBalancerArn']
+        observed = {}
+        for operation, key, extract in (
+            ('describe_listeners', 'listeners', lambda x: [
+                {'protocol': y.get('Protocol'), 'port': y.get('Port'),
+                 'ssl_policy': y.get('SslPolicy')}
+                for y in x.get('Listeners', [])]),
+            ('describe_load_balancer_attributes', 'access_logs', lambda x: {
+                a.get('Key'): a.get('Value') for a in x.get('Attributes', [])
+                if a.get('Key') in ('access_logs.s3.enabled',
+                                    'access_logs.s3.bucket',
+                                    'access_logs.s3.prefix')}),
+        ):
+            try:
+                response = api_call(elb, operation, LoadBalancerArn=arn)
+                observed[key] = extract(response)
+            except EvidenceUnavailable as exc:
+                errors.append({'region': region, 'service': 'elbv2', 'operation': operation,
+                               'resource': arn, 'reason': str(exc)[:180]})
+        if lb.get('Type') == 'application':
+            try:
+                response = api_call(ctx.client_cached('wafv2', region),
+                                    'get_web_acl_for_resource', ResourceArn=arn)
+                observed['waf_web_acl_arn'] = (response.get('WebACL') or {}).get('ARN')
+            except EvidenceUnavailable as exc:
+                # A missing WebACL is distinct from no permission to inspect it.
+                observed['waf_web_acl_lookup'] = 'NOT_ASSOCIATED' if 'WAFNonexistentItemException' in str(exc) else 'UNVERIFIED'
+                if observed['waf_web_acl_lookup'] == 'UNVERIFIED':
+                    errors.append({'region': region, 'service': 'wafv2',
+                                   'operation': 'get_web_acl_for_resource',
+                                   'resource': arn, 'reason': str(exc)[:180]})
         out.append(_record('elbv2', lb.get('Type', 'load-balancer'), region,
                            lb.get('LoadBalancerName', arn), arn=arn,
                            tags=tag_map.get(arn), name=lb.get('LoadBalancerName', ''),
                            scheme=lb.get('Scheme'), dns_name=lb.get('DNSName'),
-                           vpc_id=lb.get('VpcId'), state=lb.get('State', {}).get('Code')))
+                           security_group_ids=lb.get('SecurityGroups', []),
+                           vpc_id=lb.get('VpcId'), state=lb.get('State', {}).get('Code'),
+                           **observed))
 
 
 def _add_logs(ctx, region, out, errors):
