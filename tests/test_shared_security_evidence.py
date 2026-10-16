@@ -135,6 +135,7 @@ def test_shared_security_errors_are_explicit_unknown_and_not_absence(monkeypatch
         assert status['fail'] == 0
         assert status['ok'] == 0
         assert status['collection_error_count'] >= 1
+        assert status['evidence_state'] == 'SHARED_EVIDENCE_UNVERIFIED'
         assert any(row['property_result'] == PROPERTY_UNKNOWN
                    for row in obs['rows'] if row['number'] == n)
 
@@ -246,3 +247,42 @@ def test_product_inventory_keeps_shared_evidence_unowned_and_account_mode_unchan
     assert calls['shared'] == 1
     assert 'shared_control_evidence' not in account
     assert account['collection_errors'] == []
+
+
+
+def test_cloudtrail_delivery_time_is_utc_and_absent_errors_are_unknown():
+    from datetime import datetime, timedelta, timezone
+    from aws_security_audit.shared_security_evidence import (
+        _string_time, _known_delivery_error,
+    )
+    jst = timezone(timedelta(hours=9))
+    assert _string_time(datetime(2026, 10, 16, 19, 41, tzinfo=jst)) == (
+        '2026-10-16T10:41:00+00:00')
+    assert _string_time('2026-10-16T19:41:00+09:00') == (
+        '2026-10-16T10:41:00+00:00')
+    assert _string_time('invalid-date') is None
+    assert _string_time(datetime(2026, 10, 16, 19, 41)) is None
+    assert _known_delivery_error({}, 'LatestDeliveryError') is None
+    assert _known_delivery_error({'LatestDeliveryError': None}, 'LatestDeliveryError') is None
+    assert _known_delivery_error({'LatestDeliveryError': ''}, 'LatestDeliveryError') is False
+    assert _known_delivery_error(
+        {'LatestDeliveryError': 'AccessDenied'}, 'LatestDeliveryError') is True
+
+
+def test_securityhub_unknown_does_not_advertise_verified_shared_context():
+    inv = {
+        'resources': [], 'collection_errors': [{
+            'region': REGION, 'service': 'securityhub',
+            'operation': 'describe_hub', 'reason': 'InvalidAccessException',
+        }],
+        'shared_control_evidence': {'regions': [{
+            'region': REGION,
+            'securityhub': {'state': 'UNVERIFIED', 'standards': []},
+        }]}
+    }
+    observed = build_product_observations(inv, [REGION])
+    control = observed['by_control']['33']
+    assert control['evidence_state'] == 'SHARED_EVIDENCE_UNVERIFIED'
+    assert control['shared_context_count'] == 1
+    assert control['unknown'] == 1
+    assert control['ok'] == control['fail'] == 0
