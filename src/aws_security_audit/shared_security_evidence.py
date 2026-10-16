@@ -6,6 +6,8 @@ No secrets, detailed event records, arbitrary error messages or write APIs are p
 """
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 from .core import EvidenceUnavailable, api_call, paged
 
 
@@ -33,9 +35,21 @@ def _paged(ctx, client, operation, field, **kwargs):
 
 
 def _string_time(value):
-    return value.isoformat() if hasattr(value, 'isoformat') else (
-        value[:64] if isinstance(value, str) else None
-    )
+    """Return a verified UTC timestamp, not an unconverted local-time offset."""
+    try:
+        if isinstance(value, str):
+            value = datetime.fromisoformat(value.replace('Z', '+00:00'))
+        if isinstance(value, datetime) and value.tzinfo is not None:
+            return value.astimezone(timezone.utc).isoformat()
+    except ValueError:
+        return None
+    return None
+
+
+def _known_delivery_error(status, field):
+    """An omitted optional AWS error field is UNKNOWN, not a confirmed no-error."""
+    value = status.get(field)
+    return bool(value) if isinstance(value, str) else None
 
 
 def _trail_selector_summary(response):
@@ -101,9 +115,11 @@ def _cloudtrail(ctx, region, errors):
                 'log_status': 'VERIFIED',
                 'is_logging': status.get('IsLogging'),
                 'latest_delivery_time_utc': _string_time(status.get('LatestDeliveryTime')),
-                'has_s3_delivery_error': bool(status.get('LatestDeliveryError')),
-                'has_cloudwatch_delivery_error': bool(status.get('LatestCloudWatchLogsDeliveryError')),
-                'has_digest_delivery_error': bool(status.get('LatestDigestDeliveryError')),
+                'has_s3_delivery_error': _known_delivery_error(status, 'LatestDeliveryError'),
+                'has_cloudwatch_delivery_error': _known_delivery_error(
+                    status, 'LatestCloudWatchLogsDeliveryError'),
+                'has_digest_delivery_error': _known_delivery_error(
+                    status, 'LatestDigestDeliveryError'),
             })
         except EvidenceUnavailable as exc:
             _error(errors, region, 'cloudtrail', 'get_trail_status', exc, arn)
