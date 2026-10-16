@@ -18,6 +18,13 @@ NS = 'http://schemas.openxmlformats.org/spreadsheetml/2006/main'
 REL = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships'
 
 
+def _summary_preview(value: str) -> str:
+    """Only summary cells are shortened; findings JSON retains the complete evidence."""
+    if len(value) > 31000:
+        return value[:31000] + '\n[SUMMARY TRUNCATED — inspect findings JSON or web review for full evidence]'
+    return value
+
+
 def overall_rows(results: list[Finding], *, coverage_full: bool = False) -> list[dict]:
     by_id = {c.number: [] for c in CHECKS}
     for finding in results:
@@ -40,13 +47,16 @@ def overall_rows(results: list[Finding], *, coverage_full: bool = False) -> list
             '地域網羅': '全リージョン' if coverage_full else '一部リージョンのみ',
             '判定詳細': ('リージョン未網羅: アカウント全体のPASSは保留 | ' if account_status == 'UNKNOWN' and regional_status == 'PASS' else '') + (' | '.join(f'{f.scope}: {f.detail}' for f in findings) or '検査未実行'),
             '対象': ', '.join(f.scope for f in findings),
-            '証拠・要確認事項': '\n'.join(f'{f.scope}: {e}' for f in findings for e in f.evidence)[:32000],
+            '証拠・要確認事項': _summary_preview('\n'.join(f'{f.scope}: {e}' for f in findings for e in f.evidence)),
         })
     return output
 
 
 def _safe_spreadsheet(value: object) -> str:
     text = str(value if value is not None else '')
+    # Excel cells hold at most 32,767 characters; complete data remain in JSON.
+    if len(text) > 31000:
+        text = text[:31000] + '\\n[EXCEL CELL TRUNCATED — consult JSON for complete evidence]'
     if text.startswith(('=', '+', '-', '@', '\t', '\r', '\n')):
         return "'" + text
     return text
