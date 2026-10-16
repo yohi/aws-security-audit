@@ -1,4 +1,4 @@
-"""Public CLI: aws-security-audit setup | doctor | scan | version."""
+"""Public CLI: setup | doctor | scan | assess | policy-evidence | version."""
 from __future__ import annotations
 
 import argparse
@@ -27,17 +27,20 @@ def parser() -> argparse.ArgumentParser:
     setup.add_argument('--role-arn')
     setup.add_argument('--regions')
     setup.add_argument('--force', action='store_true', help='Overwrite existing local configuration')
-    for name in ('doctor', 'scan', 'policy-evidence'):
-        cmd = sub.add_parser(name, help={'doctor': 'Verify identity, region and sampled AWS reads', 'scan':'Run all 46 checks', 'policy-evidence':'Fingerprint actual AWS IAM managed policy'}[name])
+    for name in ('doctor', 'scan', 'assess', 'policy-evidence'):
+        cmd = sub.add_parser(name, help={'doctor': 'Verify identity, region and sampled AWS reads', 'scan':'Run all 46 checks', 'assess':'Investigate 46 checks and export supplemental read-only evidence', 'policy-evidence':'Fingerprint actual AWS IAM managed policy'}[name])
         cmd.add_argument('--source-profile', help='Profile authenticated by aws login / aws sso login')
         cmd.add_argument('--role-arn', help='Existing IAM role to assume with managed ReadOnlyAccess session policy')
         cmd.add_argument('--regions', help='Comma-separated regions, or all (default all)')
         if name == 'policy-evidence':
             cmd.add_argument('--out', default='reports', help='Output directory for original IAM policy evidence (0600)')
-        if name == 'scan':
+        if name in ('scan', 'assess'):
             cmd.add_argument('--ap-tag', help='Identify AP instances, e.g. Role=application')
             cmd.add_argument('--out', default='reports', help='Output directory (private 0600 files)')
             cmd.add_argument('--fail-on-findings', action='store_true', help='Exit 2 if FAIL or UNKNOWN exists')
+        if name == 'assess':
+            cmd.add_argument('--llm', choices=('off', 'export'), default='export',
+                             help='Generate a JSON attachment and copy/paste prompt for ChatGPT/Gemini Web; no upload')
     sub.add_parser('version', help='Show package version')
     return p
 
@@ -290,6 +293,17 @@ def main(argv: list[str] | None = None) -> int:
             'note': 'No AWS resources were changed; manual/unknown statuses are not PASS.',
         }
         paths = export_report(args.out, records, metadata)
+        if args.command == 'assess':
+            from .investigation import build_investigation, save_investigation
+            investigation = build_investigation(ctx, regions, overview, records)
+            paths.extend(save_investigation(args.out, investigation, llm_export=False))
+            if args.llm == 'export':
+                from .web_handoff import build_web_review_bundle, save_web_handoff
+                bundle = build_web_review_bundle(metadata, overview, records, investigation)
+                paths.extend(save_web_handoff(args.out, bundle))
+                print('WEB HANDOFF: attach aws_web_review_*.json to ChatGPT/Gemini Web and paste aws_web_prompt_*.md', flush=True)
+                print('SENSITIVE DATA NOTICE: inspect the attachment before uploading; it contains original finding evidence', flush=True)
+                print('No file was uploaded and no LLM API was called', flush=True)
         if not full_coverage:
             print('WARNING: partial region coverage; full-account PASS is withheld', flush=True)
         print('Summary: ' + ', '.join(f'{name}={counts[name]}' for name in ('PASS', 'FAIL', 'UNKNOWN', 'MANUAL_REVIEW', 'NOT_APPLICABLE')))
