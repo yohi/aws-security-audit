@@ -303,6 +303,13 @@ def main(argv: list[str] | None = None) -> int:
                         print(f'{item.number:02d} {item.scope:20s} FAIL           product evidence only', flush=True)
             else:
                 records = run_scan(ctx, regions, options)
+                # Preserve the established #5/#19 deep evidence before the expanded
+                # identity inventory adds extra read traffic and consumes STS lifetime.
+                from .investigation import build_investigation
+                investigation = build_investigation(
+                    ctx, regions, overall_rows(
+                        records, coverage_full=set(regions) == set(options['all_account_regions'])
+                    ), records)
                 inventory = collect_resource_inventory(ctx, regions)
         else:
             records = run_scan(ctx, regions, options)
@@ -337,8 +344,7 @@ def main(argv: list[str] | None = None) -> int:
                 }
                 print('PRODUCT SCOPE: account-wide scanner skipped; all unproven control statuses remain MANUAL_REVIEW/UNKNOWN', flush=True)
             else:
-                from .investigation import build_investigation, save_investigation
-                investigation = build_investigation(ctx, regions, overview, records)
+                from .investigation import save_investigation
                 paths.extend(save_investigation(args.out, investigation, llm_export=False))
             if args.llm == 'export':
                 from .web_handoff import build_web_review_bundle, save_web_handoff
