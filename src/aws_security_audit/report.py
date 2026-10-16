@@ -18,13 +18,16 @@ NS = 'http://schemas.openxmlformats.org/spreadsheetml/2006/main'
 REL = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships'
 
 
-def overall_rows(results: list[Finding]) -> list[dict]:
+def overall_rows(results: list[Finding], *, coverage_full: bool = True) -> list[dict]:
     by_id = {c.number: [] for c in CHECKS}
     for finding in results:
         by_id[finding.number].append(finding)
     output = []
     for check in CHECKS:
         findings = by_id[check.number]
+        regional_status = overall_status([f.status for f in findings]) if findings else 'UNKNOWN'
+        # Scope-limited PASS is not evidence for full-account compliance.
+        account_status = 'UNKNOWN' if regional_status == 'PASS' and not coverage_full else regional_status
         output.append({
             'No': check.number,
             'カテゴリ': check.category,
@@ -32,8 +35,10 @@ def overall_rows(results: list[Finding]) -> list[dict]:
             '推奨設定・確認基準': check.criterion,
             '重要度': check.severity,
             '目的・対象リスク': check.purpose,
-            '判定': overall_status([f.status for f in findings]) if findings else 'UNKNOWN',
-            '判定詳細': ' | '.join(f'{f.scope}: {f.detail}' for f in findings) or '検査未実行',
+            '判定': account_status,
+            '対象地域判定': regional_status,
+            '地域網羅': '全リージョン' if coverage_full else '一部リージョンのみ',
+            '判定詳細': ('リージョン未網羅: アカウント全体のPASSは保留 | ' if account_status == 'UNKNOWN' and regional_status == 'PASS' else '') + (' | '.join(f'{f.scope}: {f.detail}' for f in findings) or '検査未実行'),
             '対象': ', '.join(f.scope for f in findings),
             '証拠・要確認事項': '\n'.join(f'{f.scope}: {e}' for f in findings for e in f.evidence)[:32000],
         })
@@ -79,7 +84,7 @@ def _excel_bytes(rows: list[dict], details: list[dict], meta: dict) -> bytes:
     summary_keys = list(rows[0])
     detail_keys = ['No', 'scope', 'status', 'detail', 'evidence']
     tables = [
-        ([summary_keys] + [[str(x.get(k, '')) for k in summary_keys] for x in rows], [8, 22, 32, 65, 12, 46, 19, 65, 32, 75]),
+        ([summary_keys] + [[str(x.get(k, '')) for k in summary_keys] for x in rows], [8, 22, 32, 65, 12, 46, 19, 19, 24, 65, 32, 75]),
         ([detail_keys] + [[str(d.get(k, '')) for k in detail_keys] for d in details], [8, 25, 19, 65, 78]),
         ([['項目', '値']] + [[k, str(v)] for k, v in meta.items()], [28, 100]),
     ]
@@ -111,7 +116,7 @@ def _private_bytes(path: Path, content: bytes) -> None:
 def export_report(out_dir: str, findings: list[Finding], metadata: dict) -> list[Path]:
     folder = Path(out_dir).expanduser().resolve()
     folder.mkdir(mode=0o700, parents=True, exist_ok=True)
-    rows = overall_rows(findings)
+    rows = overall_rows(findings, coverage_full=metadata.get('region_coverage_full') is not False)
     details = [r.to_dict() for r in findings]
     for row in details:
         row['No'] = row.pop('number')

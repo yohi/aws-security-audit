@@ -25,12 +25,17 @@ def check_1(ctx: AuditContext, region: str, options: dict) -> Finding:
     if not tag:
         instances = ec2_inventory(ctx, region)
         return manual(1, region, 'APサーバーの識別が必要です。--ap-tag Key=Valueを指定', [f'稼働中EC2: {len(instances)}台'])
-    instances = [i for i in ec2_inventory(ctx, region) if tag_matches(i, tag)]
+    inventory = ec2_inventory(ctx, region)
+    instances = [i for i in inventory if tag_matches(i, tag)]
     fails = [i['InstanceId'] for i in instances if i.get('PublicIpAddress') or any(eni.get('Association', {}).get('PublicIp') for eni in i.get('NetworkInterfaces', []))]
     # Private subnet requires route table verification; no public IP alone is not enough.
     if fails:
         return verdict(1, region, len(instances), [f'Public IP: {i}' for i in fails], '')
-    return manual(1, region, 'APサーバーのPublic IPは検査済み。プライベートサブネットの経路表を追加確認', [f'タグ一致: {len(instances)}台']) if instances else Finding(1, 'NOT_APPLICABLE', region, '対象APサーバーなし')
+    if not instances:
+        if inventory:
+            return manual(1, region, 'APタグに一致するEC2がありません。対象APサーバーの特定・タグ設定を確認してください', [f'指定タグ: {tag}', f'稼働中EC2: {len(inventory)}台', 'APサーバーが存在しないことは未証明'])
+        return Finding(1, 'NOT_APPLICABLE', region, '稼働中EC2が存在しません。EC2以外のAPは対象外')
+    return manual(1, region, 'APサーバーのPublic IPは検査済み。プライベートサブネットの経路表を追加確認', [f'タグ一致: {len(instances)}台'])
 
 
 def check_2(ctx: AuditContext, region: str, options: dict) -> Finding:
@@ -382,22 +387,48 @@ def check_24(ctx: AuditContext, region: str, options: dict) -> Finding:
     trails = cloudtrails(ctx, options['all_account_regions'])
     if not trails:
         return Finding(24, 'FAIL', region, 'CloudTrail証跡がありません')
-    management, data = [], []
+
+    healthy_management, healthy_data = set(), set()
+    delivery_failed, delivery_unknown, checked = [], [], []
+    logging_multi_region = 0
     for home, trail in trails:
         if not trail.get('IsMultiRegionTrail'):
             continue
+        arn = trail['TrailARN']
         cli = ctx.client_cached('cloudtrail', home)
-        selectors = api_call(cli, 'get_event_selectors', TrailName=trail['TrailARN'])
-        status = api_call(cli, 'get_trail_status', Name=trail['TrailARN'])
+        selectors = api_call(cli, 'get_event_selectors', TrailName=arn)
+        status = api_call(cli, 'get_trail_status', Name=arn)
         if not status.get('IsLogging'):
+            checked.append(f'{arn}: IsLogging=False')
             continue
+        logging_multi_region += 1
+        if status.get('LatestDeliveryError'):
+            # Do not include the raw service error: it can carry arbitrary text.
+            delivery_failed.append(f'{arn}: CloudTrail S3 log delivery error present')
+            continue
+        delivered = status.get('LatestDeliveryTime')
+        if delivered is None:
+            delivery_unknown.append(f'{arn}: LatestDeliveryTime unavailable')
+            continue
+        checked.append(f'{arn}: LatestDeliveryTime={delivered.isoformat() if isinstance(delivered, datetime) else str(delivered)}')
         if management_event_enabled(selectors):
-            management.append(trail['TrailARN'])
+            healthy_management.add(arn)
         if data_event_enabled(selectors):
-            data.append(trail['TrailARN'])
-    if not management or not data:
-        return Finding(24, 'FAIL', region, 'ログ記録中のマルチリージョンCloudTrailで管理・データイベントの両方を確認できません')
-    return Finding(24, 'PASS', region, 'マルチリージョン証跡で管理イベント・データイベントを取得', list(set(management + data))[:20])
+            healthy_data.add(arn)
+
+    if not logging_multi_region:
+        return Finding(24, 'FAIL', region, 'ログ記録中のマルチリージョンCloudTrailがありません', checked[:30])
+    evidence = (delivery_failed + delivery_unknown + checked)[:100]
+    if not healthy_management or not healthy_data:
+        if delivery_failed and not delivery_unknown:
+            return Finding(24, 'FAIL', region, 'CloudTrail配信失敗または必要なイベント収集が確認できません', evidence)
+        if delivery_unknown:
+            return Finding(24, 'UNKNOWN', region, 'CloudTrailの最終配信成功が確認できず、イベント収集を証明できません', evidence)
+        return Finding(24, 'FAIL', region, '配信済みマルチリージョンCloudTrailで管理・データイベントの両方を確認できません', evidence)
+
+    # Data selector presence does not prove coverage of all required resources.
+    evidence += [f'管理イベント選択: {len(healthy_management)}証跡', f'データイベント選択: {len(healthy_data)}証跡']
+    return manual(24, region, '配信成功時刻とイベント選択設定を確認。Data Event対象範囲・実際のログ配送・必要なイベントの網羅性を検証してください', evidence)
 
 
 def check_25(ctx: AuditContext, region: str, options: dict) -> Finding:
@@ -417,16 +448,46 @@ def check_27(ctx: AuditContext, region: str, options: dict) -> Finding:
     vpcs = paged(ec2, 'describe_vpcs', 'Vpcs')
     subnets = paged(ec2, 'describe_subnets', 'Subnets')
     flow_logs = paged(ec2, 'describe_flow_logs', 'FlowLogs')
-    all_logged = {x['ResourceId'] for x in flow_logs if x.get('FlowLogStatus') == 'ACTIVE' and x.get('TrafficType') == 'ALL'}
-    fails = []
+    if not vpcs:
+        return Finding(27, 'NOT_APPLICABLE', region, '対象VPCがありません')
+
+    delivered = set()
+    unverified = set()
+    delivery_failed = set()
+    for entry in flow_logs:
+        if entry.get('FlowLogStatus') != 'ACTIVE' or entry.get('TrafficType') != 'ALL':
+            continue
+        resource = entry.get('ResourceId')
+        delivery = entry.get('DeliverLogsStatus')
+        if delivery == 'SUCCESS':
+            delivered.add(resource)
+        elif delivery == 'FAILED':
+            delivery_failed.add(resource)
+        else:
+            # Missing, pending or unrecognized statuses can never imply PASS.
+            unverified.add(resource)
+
+    failures, unknowns = [], []
     for vpc in vpcs:
         vpc_id = vpc['VpcId']
-        if vpc_id in all_logged:
+        if vpc_id in delivered:
             continue
-        vpc_subnet_ids = {s['SubnetId'] for s in subnets if s['VpcId'] == vpc_id}
-        if not vpc_subnet_ids or not vpc_subnet_ids.issubset(all_logged):
-            fails.append(vpc_id)
-    return verdict(27, region, len(vpcs), fails, 'VPCまたは全サブネットでACTIVEなFlow Logsを確認')
+        vpc_subnets = {x['SubnetId'] for x in subnets if x['VpcId'] == vpc_id}
+        required = vpc_subnets or {vpc_id}
+        if vpc_subnets and required.issubset(delivered):
+            continue
+        unresolved = required - delivered
+        if vpc_id in unverified or unresolved & unverified:
+            unknowns.append(f'{vpc_id}: 配信状態が未確認のFlow Logがあります')
+        elif vpc_id in delivery_failed or unresolved & delivery_failed:
+            failures.append(f'{vpc_id}: Flow Log delivery FAILED / 未網羅')
+        else:
+            failures.append(f'{vpc_id}: ACTIVEかつALLかつ配信SUCCESSのFlow Logsが不足')
+    if failures:
+        return Finding(27, 'FAIL', region, 'VPC Flow Logsの配信失敗・未設定を確認', (failures + unknowns)[:100])
+    if unknowns:
+        return Finding(27, 'UNKNOWN', region, 'VPC Flow Logsの配送成功が証明できません', unknowns[:100])
+    return Finding(27, 'PASS', region, f'{len(vpcs)}件のVPCでACTIVE/ALL/配信SUCCESSを確認')
 
 
 def check_28(ctx: AuditContext, region: str, options: dict) -> Finding:
@@ -482,7 +543,30 @@ def check_33(ctx: AuditContext, region: str, options: dict) -> Finding:
     active = [s for s in standards if s.get('StandardsStatus') == 'READY']
     if not active:
         return Finding(33, 'FAIL', region, 'Security Hubは有効ですが、検査用標準が有効ではありません')
-    return Finding(33, 'PASS', region, 'Security Hub CSPMとセキュリティ標準が有効', [x.get('StandardsArn', '') for x in active])
+
+    enabled = disabled = other = 0
+    evidence = []
+    for standard in active:
+        subscription = standard.get('StandardsSubscriptionArn')
+        if not subscription:
+            return Finding(33, 'UNKNOWN', region, '標準のSubscription ARNを確認できません')
+        controls = paged(sh, 'describe_standards_controls', 'Controls', StandardsSubscriptionArn=subscription)
+        for control in controls:
+            state = control.get('ControlStatus')
+            if state == 'ENABLED':
+                enabled += 1
+            elif state == 'DISABLED':
+                disabled += 1
+            else:
+                other += 1
+        evidence.append(f'{subscription}: 有効/無効/不明={sum(x.get("ControlStatus") == "ENABLED" for x in controls)}/{sum(x.get("ControlStatus") == "DISABLED" for x in controls)}/{sum(x.get("ControlStatus") not in ("ENABLED", "DISABLED") for x in controls)}')
+
+    if not enabled and disabled and not other:
+        return Finding(33, 'FAIL', region, 'Security HubのREADY標準ではすべてのコントロールが無効です', evidence[:30])
+    if not enabled:
+        return Finding(33, 'UNKNOWN', region, 'Security Hub標準がREADYでも有効な個別コントロールを確認できません', evidence[:30])
+    evidence.append(f'Control totals: enabled={enabled} disabled={disabled} unknown={other}')
+    return manual(33, region, 'Security Hub個別コントロールの設定を確認。実際のチェック実施履歴・無効化されたControlの妥当性は未証明', evidence[:30])
 
 
 def check_34(ctx: AuditContext, region: str, options: dict) -> Finding:

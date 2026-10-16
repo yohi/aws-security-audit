@@ -147,17 +147,20 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         options = {'regions': regions, 'all_account_regions': ctx.active_regions(), 'ap_tag': args.ap_tag}
         records = run_scan(ctx, regions, options)
-        overview = overall_rows(records)
+        full_coverage = set(regions) == set(options['all_account_regions'])
+        overview = overall_rows(records, coverage_full=full_coverage)
         counts = Counter(x['判定'] for x in overview)
         metadata = {
             'version': __version__, 'timestamp': timestamp(), 'account': ctx.account,
             'role_arn': ctx.expected_role_arn, 'caller_arn': ctx.identity_arn,
             'requested_regions': regions, 'available_regions': options['all_account_regions'],
-            'region_coverage_full': set(regions) == set(options['all_account_regions']),
+            'region_coverage_full': full_coverage,
             'session_policy': 'arn:aws:iam::aws:policy/ReadOnlyAccess',
             'note': 'No AWS resources were changed; manual/unknown statuses are not PASS.',
         }
         paths = export_report(args.out, records, metadata)
+        if not full_coverage:
+            print('WARNING: partial region coverage; full-account PASS is withheld', flush=True)
         print('Summary: ' + ', '.join(f'{name}={counts[name]}' for name in ('PASS', 'FAIL', 'UNKNOWN', 'MANUAL_REVIEW', 'NOT_APPLICABLE')))
         for path in paths:
             print(f'Report: {path}')

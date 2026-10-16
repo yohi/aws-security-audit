@@ -42,7 +42,7 @@ uvx --from 'git+ssh://git@github.com/yohi/aws-security-audit.git@COMMIT_SHA' \
   --out ./reports
 ```
 
-Use `--regions all` for full regional coverage; with a subset the report documents its partial coverage. `--ap-tag Role=application` can supplement AP-server identification but route-table validation remains manual.
+Use `--regions all` for full regional coverage; with a subset the report withholds any account-wide PASS, recording the scanned-region result separately. `--ap-tag Role=application` can supplement AP-server identification but route-table validation remains manual.
 
 ## Authentication: least privilege
 
@@ -58,6 +58,8 @@ Use `--regions all` for full regional coverage; with a subset the report documen
 ## Output
 
 One JSON file (machine readable, including regional findings), CSV and XLSX (46-item summary + regional evidence + execution metadata), with private `0600` file permissions on Unix. Report content never includes secrets. Output files have unique UTC timestamps and are not overwritten.
+
+The `判定` field represents account-wide compliance, while `対象地域判定` represents only scanned regions. With partial region coverage a regional PASS becomes account-wide UNKNOWN; the metadata includes `region_coverage_full`.
 
 Statuses:
 - `PASS` — sufficient evidence for the implemented subset of the stated criterion.
@@ -83,3 +85,12 @@ The tool never changes AWS resources or enables charged services. AWS API calls 
 ## Security disclaimer
 
 A fixed Git commit SHA is recommended for reproducibility. `uvx --from git+ssh` does not automatically honor the repository's `uv.lock` as a package consumer; dependency constraints need deliberate release management. Validate a release's source and dependencies before use.
+
+## Independent review PR #1 F-001–005 limited fixes
+
+- F-001: CloudTrail S3 delivery error and latest successful delivery are inspected. Data selectors without proven target coverage remain MANUAL_REVIEW (no automatic PASS).
+- F-002: Flow Logs require ACTIVE + ALL + DeliverLogsStatus SUCCESS for positive coverage. FAILED cannot count as delivered; absent/pending delivery is UNKNOWN.
+- F-003: Security Hub READY requires enumeration of individual standard controls; controls enabled do not alone prove a check was executed.
+- F-004: partial regions preserve regional findings but prevent account-wide PASS, including CSV/XLSX/JSON summaries.
+- F-005: zero AP tag matches while active EC2 instances exist returns MANUAL_REVIEW instead of NOT_APPLICABLE.
+- Static regression tests do not replace actual AWS integration or independent proof of effective IAM write restrictions.
