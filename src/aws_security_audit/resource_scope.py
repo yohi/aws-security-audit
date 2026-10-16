@@ -100,7 +100,7 @@ def _add_ec2(ctx, region, out, errors):
                                volume_size_gib=snap.get('VolumeSize')))
     except EvidenceUnavailable as exc:
         errors.append({'region': region, 'service': 'ec2',
-                       'operation': 'describe_snapshots', 'reason': str(exc)[:180})
+                       'operation': 'describe_snapshots', 'reason': str(exc)[:180]})
 
 
 def _add_rds(ctx, region, out, errors):
