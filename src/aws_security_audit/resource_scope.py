@@ -321,30 +321,70 @@ def attribute_resources(resources, product=None, product_tag=None):
     if product is None:
         return resources, {'mode': 'account', 'matched': len(resources),
                            'unassigned': 0, 'related': 0}
-    direct = set()
     for resource in resources:
         match = _direct_match(resource, product, product_tag)
         if match:
             resource['attribution'] = 'DIRECT'
             resource['attribution_evidence'] = match
-            direct.add((resource['region'], resource['resource_type'], resource['resource_id']))
-    matched_instances = {rid for region, typ, rid in direct if typ == 'instance'}
-    # Related objects are only explicitly linked by AWS instance attachment/group membership.
-    # They are not proof of exclusive ownership; never infer parent VPC ownership.
+    # One-hop AWS topology relationships only. Do not infer a product solely
+    # from membership in a shared VPC, subnet, IAM role, or security group.
+    direct = [r for r in resources if r['attribution'] == 'DIRECT']
+    keys = {(r['region'], r['resource_type'], r['resource_id']) for r in direct}
+    attached_sg = {(r['region'], sg) for r in direct
+                   for sg in r['attributes'].get('security_group_ids', []) if sg}
+    referenced_vpc = {(r['region'], r['attributes']['vpc_id']) for r in direct
+                      if r['attributes'].get('vpc_id')}
+    referenced_subnet = {(r['region'], r['attributes']['subnet_id']) for r in direct
+                         if r['attributes'].get('subnet_id')}
     for resource in resources:
         if resource['attribution'] == 'DIRECT':
             continue
         attrs = resource['attributes']
-        if resource['resource_type'] == 'ebs-volume' and any(
-            x in matched_instances for x in attrs.get('attached_instance_ids', [])):
+        region, kind, rid = resource['region'], resource['resource_type'], resource['resource_id']
+        reason = None
+        if kind == 'ebs-volume' and any(
+            (region, 'instance', x) in keys for x in attrs.get('attached_instance_ids', [])):
+            reason = 'Attached to directly matched EC2 instance; may be shared'
+        elif kind == 'ebs-snapshot' and attrs.get('source_volume_id') and (
+            (region, 'ebs-volume', attrs['source_volume_id']) in keys or
+            any((region, 'ebs-volume', x['resource_id']) in keys and
+                x['resource_id'] == attrs['source_volume_id'] for x in resources)):
+            reason = 'Snapshot references directly matched EBS volume'
+        elif kind == 'security-group' and (region, rid) in attached_sg:
+            reason = 'Referenced by directly matched EC2/ALB/RDS; may be shared'
+        elif kind == 'db-cluster' and any(
+            x['region'] == region and x['resource_type'] == 'db-instance'
+            and x['attributes'].get('cluster_id') == rid for x in direct):
+            reason = 'Parent cluster of directly matched RDS instance'
+        elif kind in ('db-snapshot', 'db-cluster-snapshot') and attrs.get('source_db_id'):
+            target_kind = 'db-instance' if kind == 'db-snapshot' else 'db-cluster'
+            if (region, target_kind, attrs['source_db_id']) in keys:
+                reason = 'Snapshot references directly matched RDS resource'
+        elif kind == 'vpc' and (region, rid) in referenced_vpc:
+            reason = 'Referenced VPC; shared infrastructure, not exclusive ownership'
+        elif kind == 'subnet' and (region, rid) in referenced_subnet:
+            reason = 'Referenced EC2 subnet; may be shared'
+        if reason:
             resource['attribution'] = 'RELATED'
-            resource['attribution_evidence'] = 'Attached to directly matched EC2 instance'
-        if resource['resource_type'] == 'security-group' and any(
-            resource['resource_id'] in inst['attributes'].get('security_group_ids', [])
-            for inst in resources if inst['resource_type'] == 'instance' and
-            inst['attribution'] == 'DIRECT' and inst['region'] == resource['region']):
+            resource['attribution_evidence'] = reason
+    # A second *one-hop* pass includes snapshots attached to RELATED volumes,
+    # cluster snapshots for RELATED clusters, without recursively including
+    # unrelated members of shared VPCs.
+    linked = {(r['region'], r['resource_type'], r['resource_id'])
+              for r in resources if r['attribution'] in ('DIRECT', 'RELATED')}
+    for resource in resources:
+        if resource['attribution'] != 'UNCLASSIFIED':
+            continue
+        attrs, region, kind = resource['attributes'], resource['region'], resource['resource_type']
+        source_kind = {'ebs-snapshot': 'ebs-volume',
+                       'db-snapshot': 'db-instance',
+                       'db-cluster-snapshot': 'db-cluster'}.get(kind)
+        source_id = attrs.get('source_volume_id' if kind == 'ebs-snapshot' else 'source_db_id')
+        if source_kind and source_id and (region, source_kind, source_id) in linked:
             resource['attribution'] = 'RELATED'
-            resource['attribution_evidence'] = 'Attached to directly matched EC2 instance; may be shared'
+            resource['attribution_evidence'] = (
+                f'Snapshot references {source_kind} with DIRECT/RELATED attribution; ownership not proven'
+            )
     selected = [r for r in resources if r['attribution'] != 'UNCLASSIFIED']
     return selected, {
         'mode': 'product', 'product': product, 'product_tag': product_tag,
@@ -353,9 +393,8 @@ def attribute_resources(resources, product=None, product_tag=None):
         'related': sum(x['attribution'] == 'RELATED' for x in selected),
         'unassigned': len(resources) - len(selected),
         'attribution_complete': False,
-        'warning': 'Tag/Name attribution is not proof of complete product ownership. Shared and untagged resources may be omitted.',
+        'warning': 'Tag/Name and topology attribution cannot prove product ownership. VPC, SG, snapshots and other resources can be shared.',
     }
-
 
 def collect_resource_inventory(ctx, regions, product=None, product_tag=None):
     inventory = []
