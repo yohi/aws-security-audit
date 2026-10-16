@@ -433,6 +433,89 @@ def collect_resource_inventory(ctx, regions, product=None, product_tag=None):
             ]}
 
 
+PRODUCT_OBSERVATION_FIELDS = {
+    1: {'instance': ('state', 'public_ipv4', 'subnet_id', 'vpc_id')},
+    2: {'db-instance': ('publicly_accessible', 'cluster_id', 'engine')},
+    5: {'security-group': ('dangerous_ingress', 'vpc_id')},
+    6: {'application': ('scheme', 'waf_web_acl_arn', 'waf_web_acl_lookup')},
+    14: {'instance': ('state', 'subnet_id')},
+    16: {'application': ('listeners', 'scheme')},
+    17: {'bucket': ('default_encryption_algorithms',)},
+    18: {'bucket': ('bucket_public_access_block',)},
+    19: {'ebs-volume': ('encrypted', 'size_gib', 'attached_instance_ids'),
+         'ebs-snapshot': ('encrypted', 'source_volume_id')},
+    20: {'db-instance': ('encrypted', 'engine'),
+         'db-cluster': ('encrypted', 'engine'),
+         'db-snapshot': ('encrypted', 'source_db_id'),
+         'db-cluster-snapshot': ('encrypted', 'source_db_id')},
+    22: {'bucket': ('versioning_status', 'object_lock_enabled')},
+    27: {'vpc': ('flow_logs',)},
+    29: {'application': ('access_logs',)},
+    31: {'log-group': ('retention_days',)},
+}
+
+
+def product_observations(inventory, region, control):
+    """Bounded-attribute evidence only; observation is not a PASS/FAIL decision."""
+    fields_by_type = PRODUCT_OBSERVATION_FIELDS.get(control, {})
+    observed = []
+    for resource in inventory['resources']:
+        if resource['region'] not in (region, 'global'):
+            continue
+        fields = fields_by_type.get(resource['resource_type'])
+        if not fields:
+            continue
+        attrs = resource['attributes']
+        values = {key: attrs[key] for key in fields if key in attrs}
+        observed.append(
+            f"{resource['resource_type']} {resource['name']} ({resource['resource_id']}), "
+            f"attribution={resource['attribution']}: " +
+            json.dumps(values, ensure_ascii=False, sort_keys=True)
+        )
+    return observed
+
+
+def product_deep_evidence(inventory, regions):
+    """Product-scoped #5/#19 evidence; explicitly partial and never internet reachability proof."""
+    output = {}
+    for region in regions:
+        group = [r for r in inventory['resources'] if r['region'] == region]
+        sgs = [r for r in group if r['resource_type'] == 'security-group']
+        volumes = [r for r in group if r['resource_type'] == 'ebs-volume']
+        snapshots = [r for r in group if r['resource_type'] == 'ebs-snapshot']
+        output[region] = {
+            '5': {
+                'state': 'PARTIAL_OBSERVED',
+                'groups': [{'id': r['resource_id'], 'name': r['name'],
+                            'attribution': r['attribution'],
+                            'dangerous_ingress_permissions': r['attributes'].get('dangerous_ingress')}
+                           for r in sgs],
+                'limitations': [
+                    'No ingress/egress rule-by-rule payload, ENI reachability, or actual internet probing.',
+                    'Unattributed groups may be absent and RELATED groups may be shared.',
+                ],
+            },
+            '19': {
+                'state': 'PARTIAL_OBSERVED',
+                'volumes': [{'id': r['resource_id'], 'name': r['name'],
+                             'attribution': r['attribution'],
+                             'encrypted': r['attributes'].get('encrypted'),
+                             'size_gib': r['attributes'].get('size_gib'),
+                             'attached_instance_ids': r['attributes'].get('attached_instance_ids', [])}
+                            for r in volumes],
+                'snapshots': [{'id': r['resource_id'], 'encrypted': r['attributes'].get('encrypted'),
+                               'source_volume_id': r['attributes'].get('source_volume_id'),
+                               'attribution': r['attribution']}
+                              for r in snapshots],
+                'limitations': [
+                    'Only matched/tagged snapshots are present. Missing original VolumeId links cannot prove absence.',
+                    'Collection failures are recorded separately; evidence is not a complete backup inventory.',
+                ],
+            },
+        }
+    return output
+
+
 def product_findings(inventory, regions):
     """Emit conservative, product-scoped findings; keep account-level status separate.
 
@@ -460,9 +543,9 @@ def product_findings(inventory, regions):
             elif check.number == 5:
                 selected, key, negative = [r for r in region_items if r['resource_type'] == 'security-group'], 'dangerous_ingress', None
             elif check.number == 19:
-                selected, key, negative = [r for r in region_items if r['resource_type'] == 'ebs-volume'], 'encrypted', False
+                selected, key, negative = [r for r in region_items if r['resource_type'] in ('ebs-volume', 'ebs-snapshot')], 'encrypted', False
             elif check.number == 20:
-                selected, key, negative = [r for r in region_items if r['resource_type'] in ('db-instance', 'db-cluster')], 'encrypted', False
+                selected, key, negative = [r for r in region_items if r['resource_type'] in ('db-instance', 'db-cluster', 'db-snapshot', 'db-cluster-snapshot')], 'encrypted', False
             elif check.number == 23:
                 clusters = {r['resource_id']: r for r in region_items if r['resource_type'] == 'db-cluster'}
                 instances = [r for r in region_items if r['resource_type'] == 'db-instance']
@@ -504,6 +587,9 @@ def product_findings(inventory, regions):
                                 for r in failures]
                 else:
                     detail = f'対象リソース{len(selected)}件。未検出はPASSの証明ではない'
+            observations = product_observations(inventory, region, check.number)
+            if observations:
+                evidence = evidence + ['OBSERVED (not a PASS claim): ' + value for value in observations]
             if not relevant:
                 status, detail = 'UNKNOWN', '対象リソースを特定できない。タグ/Name/収集権限/リージョンを確認'
             output.append(Finding(check.number, status, region, detail, evidence))
