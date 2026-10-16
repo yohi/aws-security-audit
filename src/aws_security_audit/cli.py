@@ -321,7 +321,7 @@ def main(argv: list[str] | None = None) -> int:
             'session_policy': 'arn:aws:iam::aws:policy/ReadOnlyAccess',
             'note': 'No AWS resources were changed; manual/unknown statuses are not PASS.',
         }
-        paths = export_report(args.out, records, metadata)
+        paths = export_report(args.out, records, metadata, resource_inventory=inventory)
         if args.command == 'assess':
             from .resource_scope import save_resource_inventory
             paths.extend(save_resource_inventory(args.out, inventory))
