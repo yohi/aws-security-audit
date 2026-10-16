@@ -1,0 +1,350 @@
+"""Read-only resource identity inventory and conservative product attribution.
+
+This module never mutates AWS. Product reports are evidence-oriented and intentionally
+do not inherit account-wide control verdicts without a resource-to-product proof.
+"""
+from __future__ import annotations
+
+import csv
+import json
+import re
+from collections import Counter
+from io import StringIO
+from pathlib import Path
+from uuid import uuid4
+
+from .catalog import CHECKS
+from .core import EvidenceUnavailable, Finding, api_call, paged
+from .report import _private_bytes
+
+IDENTITY_TAGS = ('Name', 'Product', 'Project', 'Application', 'Service', 'Environment', 'Owner')
+PRODUCT_TAGS = ('Product', 'Project', 'Application', 'Service')
+
+
+def identity_tags(raw) -> dict[str, str]:
+    """Capture identifying tags only; never persist arbitrary secret-bearing tags."""
+    if isinstance(raw, dict):
+        raw = [{'Key': k, 'Value': v} for k, v in raw.items()]
+    return {t['Key']: str(t.get('Value', '')) for t in (raw or [])
+            if isinstance(t, dict) and t.get('Key') in IDENTITY_TAGS}
+
+
+def _record(service, kind, region, identifier, arn='', tags=None, name='', **attributes):
+    tags = identity_tags(tags or [])
+    return {
+        'service': service, 'resource_type': kind, 'region': region,
+        'resource_id': str(identifier), 'arn': str(arn or ''),
+        'name': str(tags.get('Name') or name or identifier),
+        'tags': tags, 'attributes': attributes,
+        'attribution': 'UNCLASSIFIED', 'attribution_evidence': '',
+    }
+
+
+def _tagged(ctx, service, region, arn, key='TagList'):
+    try:
+        return api_call(ctx.client_cached(service, region), 'list_tags_for_resource', ResourceName=arn).get(key, [])
+    except EvidenceUnavailable:
+        return []  # Scope must remain incomplete if resource tags cannot be established.
+
+
+def _add_ec2(ctx, region, out):
+    ec2 = ctx.client_cached('ec2', region)
+    for reservation in paged(ec2, 'describe_instances', 'Reservations'):
+        for i in reservation.get('Instances', []):
+            if i.get('State', {}).get('Name') == 'terminated':
+                continue
+            out.append(_record('ec2', 'instance', region, i['InstanceId'], tags=i.get('Tags'),
+                               state=i.get('State', {}).get('Name'),
+                               vpc_id=i.get('VpcId'), subnet_id=i.get('SubnetId'),
+                               public_ipv4=bool(i.get('PublicIpAddress')),
+                               security_group_ids=[g['GroupId'] for g in i.get('SecurityGroups', [])],
+                               volume_ids=[m['Ebs']['VolumeId'] for m in i.get('BlockDeviceMappings', [])
+                                           if m.get('Ebs', {}).get('VolumeId')]))
+    for sg in paged(ec2, 'describe_security_groups', 'SecurityGroups'):
+        # Count high-risk rules with the same deterministic scanner logic.
+        from .checks import dangerous_inbound
+        out.append(_record('ec2', 'security-group', region, sg['GroupId'], tags=sg.get('Tags'),
+                           vpc_id=sg.get('VpcId'),
+                           dangerous_ingress=sum(bool(dangerous_inbound(p)) for p in sg.get('IpPermissions', []))))
+    for vol in paged(ec2, 'describe_volumes', 'Volumes'):
+        out.append(_record('ec2', 'ebs-volume', region, vol['VolumeId'], tags=vol.get('Tags'),
+                           encrypted=vol.get('Encrypted'), size_gib=vol.get('Size'),
+                           attached_instance_ids=[a['InstanceId'] for a in vol.get('Attachments', [])
+                                                  if a.get('InstanceId')]))
+    for vpc in paged(ec2, 'describe_vpcs', 'Vpcs'):
+        out.append(_record('ec2', 'vpc', region, vpc['VpcId'], tags=vpc.get('Tags'),
+                           cidr_block=vpc.get('CidrBlock')))
+    for subnet in paged(ec2, 'describe_subnets', 'Subnets'):
+        out.append(_record('ec2', 'subnet', region, subnet['SubnetId'], tags=subnet.get('Tags'),
+                           vpc_id=subnet.get('VpcId'), cidr_block=subnet.get('CidrBlock')))
+
+
+def _add_rds(ctx, region, out):
+    rds = ctx.client_cached('rds', region)
+    for db in paged(rds, 'describe_db_instances', 'DBInstances'):
+        arn = db.get('DBInstanceArn', '')
+        tags = db.get('TagList')
+        if tags is None and arn:
+            tags = _tagged(ctx, 'rds', region, arn)
+        out.append(_record('rds', 'db-instance', region, db['DBInstanceIdentifier'],
+                           arn=arn, tags=tags, encrypted=db.get('StorageEncrypted'),
+                           publicly_accessible=db.get('PubliclyAccessible'),
+                           deletion_protection=db.get('DeletionProtection'),
+                           cluster_id=db.get('DBClusterIdentifier'), engine=db.get('Engine')))
+    for db in paged(rds, 'describe_db_clusters', 'DBClusters'):
+        arn = db.get('DBClusterArn', '')
+        tags = db.get('TagList')
+        if tags is None and arn:
+            tags = _tagged(ctx, 'rds', region, arn)
+        out.append(_record('rds', 'db-cluster', region, db['DBClusterIdentifier'],
+                           arn=arn, tags=tags, encrypted=db.get('StorageEncrypted'),
+                           deletion_protection=db.get('DeletionProtection'), engine=db.get('Engine')))
+
+
+def _add_elb(ctx, region, out):
+    elb = ctx.client_cached('elbv2', region)
+    lbs = paged(elb, 'describe_load_balancers', 'LoadBalancers')
+    # ALB/NLB tags are not present in DescribeLoadBalancers.
+    tag_map = {}
+    for index in range(0, len(lbs), 20):
+        batch = lbs[index:index + 20]
+        if not batch:
+            continue
+        try:
+            resp = api_call(elb, 'describe_tags', ResourceArns=[lb['LoadBalancerArn'] for lb in batch])
+            for d in resp.get('TagDescriptions', []):
+                tag_map[d['ResourceArn']] = d.get('Tags', [])
+        except EvidenceUnavailable:
+            pass
+    for lb in lbs:
+        arn = lb['LoadBalancerArn']
+        out.append(_record('elbv2', lb.get('Type', 'load-balancer'), region,
+                           lb.get('LoadBalancerName', arn), arn=arn,
+                           tags=tag_map.get(arn), name=lb.get('LoadBalancerName', ''),
+                           scheme=lb.get('Scheme'), dns_name=lb.get('DNSName'),
+                           vpc_id=lb.get('VpcId'), state=lb.get('State', {}).get('Code')))
+
+
+def _add_logs(ctx, region, out):
+    for g in paged(ctx.client_cached('logs', region), 'describe_log_groups', 'logGroups'):
+        out.append(_record('logs', 'log-group', region, g['logGroupName'],
+                           arn=g.get('arn', ''), name=g['logGroupName'],
+                           retention_days=g.get('retentionInDays')))
+
+
+def _add_s3(ctx, out):
+    s3 = ctx.client_cached('s3')
+    buckets = api_call(s3, 'list_buckets').get('Buckets', [])
+    for bucket in buckets:
+        name = bucket['Name']
+        tags = []
+        try:
+            tags = api_call(s3, 'get_bucket_tagging', Bucket=name).get('TagSet', [])
+        except EvidenceUnavailable:
+            pass
+        out.append(_record('s3', 'bucket', 'global', name, arn=f'arn:aws:s3:::{name}',
+                           tags=tags, name=name))
+
+
+def _add_iam(ctx, out):
+    iam = ctx.client_cached('iam')
+    for user in paged(iam, 'list_users', 'Users'):
+        out.append(_record('iam', 'user', 'global', user['UserName'],
+                           arn=user.get('Arn', ''), name=user['UserName'],
+                           path=user.get('Path', '')))
+    for role in paged(iam, 'list_roles', 'Roles'):
+        out.append(_record('iam', 'role', 'global', role['RoleName'],
+                           arn=role.get('Arn', ''), name=role['RoleName'],
+                           path=role.get('Path', '')))
+
+
+def _add_cloudfront(ctx, out):
+    cf = ctx.client_cached('cloudfront', 'us-east-1')
+    marker = None
+    for _ in range(10000):
+        args = {'Marker': marker} if marker else {}
+        data = api_call(cf, 'list_distributions', **args).get('DistributionList', {})
+        for d in data.get('Items', []):
+            arn = d.get('ARN', '')
+            tags = []
+            if arn:
+                try:
+                    tags = api_call(cf, 'list_tags_for_resource', Resource=arn).get('Tags', {}).get('Items', [])
+                except EvidenceUnavailable:
+                    pass
+            out.append(_record('cloudfront', 'distribution', 'global', d['Id'],
+                               arn=arn, tags=tags, name=d.get('Comment', '') or d['Id'],
+                               domain_name=d.get('DomainName'), enabled=d.get('Enabled')))
+        if not data.get('IsTruncated'):
+            return
+        next_marker = data.get('NextMarker')
+        if not next_marker or next_marker == marker:
+            raise EvidenceUnavailable('cloudfront.list_distributions: pagination cycle')
+        marker = next_marker
+    raise EvidenceUnavailable('cloudfront.list_distributions: pagination limit')
+
+
+def _prefix_match(value: str, product: str) -> bool:
+    # Avoid conflating 'ros' and 'roslyn', or 'scs2' with 'scs20'.
+    left, right = value.casefold(), product.casefold()
+    return left == right or left.startswith(right + '-') or left.startswith(right + '_') or left.startswith(right + '/')
+
+
+def _direct_match(resource, product, product_tag):
+    tags = resource['tags']
+    if product_tag:
+        key, value = product_tag.split('=', 1)
+        if tags.get(key) == value:
+            return 'TAG:' + product_tag
+        return None
+    for key in PRODUCT_TAGS:
+        if tags.get(key, '').casefold() == product.casefold():
+            return 'TAG:' + key
+    if _prefix_match(resource['name'], product) or _prefix_match(resource['resource_id'], product):
+        return 'PREFIX:NameOrId'
+    return None
+
+
+def attribute_resources(resources, product=None, product_tag=None):
+    if product is None:
+        return resources, {'mode': 'account', 'matched': len(resources),
+                           'unassigned': 0, 'related': 0}
+    direct = set()
+    for resource in resources:
+        match = _direct_match(resource, product, product_tag)
+        if match:
+            resource['attribution'] = 'DIRECT'
+            resource['attribution_evidence'] = match
+            direct.add((resource['region'], resource['resource_type'], resource['resource_id']))
+    matched_instances = {rid for region, typ, rid in direct if typ == 'instance'}
+    # Related objects are only explicitly linked by AWS instance attachment/group membership.
+    # They are not proof of exclusive ownership; never infer parent VPC ownership.
+    for resource in resources:
+        if resource['attribution'] == 'DIRECT':
+            continue
+        attrs = resource['attributes']
+        if resource['resource_type'] == 'ebs-volume' and any(
+            x in matched_instances for x in attrs.get('attached_instance_ids', [])):
+            resource['attribution'] = 'RELATED'
+            resource['attribution_evidence'] = 'Attached to directly matched EC2 instance'
+        if resource['resource_type'] == 'security-group' and any(
+            resource['resource_id'] in inst['attributes'].get('security_group_ids', [])
+            for inst in resources if inst['resource_type'] == 'instance' and
+            inst['attribution'] == 'DIRECT' and inst['region'] == resource['region']):
+            resource['attribution'] = 'RELATED'
+            resource['attribution_evidence'] = 'Attached to directly matched EC2 instance; may be shared'
+    selected = [r for r in resources if r['attribution'] != 'UNCLASSIFIED']
+    return selected, {
+        'mode': 'product', 'product': product, 'product_tag': product_tag,
+        'matched': len(selected),
+        'direct': sum(x['attribution'] == 'DIRECT' for x in selected),
+        'related': sum(x['attribution'] == 'RELATED' for x in selected),
+        'unassigned': len(resources) - len(selected),
+        'attribution_complete': False,
+        'warning': 'Tag/Name attribution is not proof of complete product ownership. Shared and untagged resources may be omitted.',
+    }
+
+
+def collect_resource_inventory(ctx, regions, product=None, product_tag=None):
+    inventory = []
+    errors = []
+    for region in regions:
+        for label, collect in (
+            ('ec2', _add_ec2), ('rds', _add_rds),
+            ('elbv2', _add_elb), ('logs', _add_logs),
+        ):
+            try:
+                ctx.guard_expiration()
+                collect(ctx, region, inventory)
+            except EvidenceUnavailable as exc:
+                errors.append({'region': region, 'service': label,
+                               'reason': str(exc)[:180]})
+    for label, collect in (('s3', _add_s3), ('iam', _add_iam), ('cloudfront', _add_cloudfront)):
+        try:
+            ctx.guard_expiration()
+            collect(ctx, inventory)
+        except EvidenceUnavailable as exc:
+            errors.append({'region': 'global', 'service': label,
+                           'reason': str(exc)[:180]})
+    selected, scope = attribute_resources(inventory, product, product_tag)
+    scope['service_counts'] = dict(Counter(r['service'] for r in selected))
+    scope['collection_errors'] = len(errors)
+    return {'schema': 'aws-security-resource-inventory-v1',
+            'scope': scope, 'regions_requested': list(regions),
+            'resources': selected, 'collection_errors': errors,
+            'limitations': [
+                'Not all AWS services and resource types are inventoried.',
+                'Resource identity tags are a restricted allowlist, not full tag payloads.',
+                'Related SG/EBS may be shared with other products.',
+                'Name-prefix attribution is heuristic; untagged/shared resources may be omitted.',
+                'Resource inventory is not a replacement for per-control security assessment.',
+            ]}
+
+
+def product_findings(inventory, regions):
+    """46 conservative product findings. No account-wide verdict is inherited."""
+    by_region = {}
+    for resource in inventory['resources']:
+        by_region.setdefault(resource['region'], []).append(resource)
+    output = []
+    for region in regions:
+        region_items = by_region.get(region, [])
+        global_items = by_region.get('global', [])
+        relevant = region_items + (global_items if region == regions[0] else [])
+        for check in CHECKS:
+            status = 'MANUAL_REVIEW'
+            detail = 'プロダクト限定の既存46項目判定ロジックは未実装。帰属・共有・未タグ対象の確認が必要'
+            evidence = []
+            selected = []
+            key = None
+            negative = None
+            if check.number == 2:
+                selected, key, negative = [r for r in region_items if r['resource_type'] == 'db-instance'], 'publicly_accessible', True
+            elif check.number == 5:
+                selected, key, negative = [r for r in region_items if r['resource_type'] == 'security-group'], 'dangerous_ingress', None
+            elif check.number == 19:
+                selected, key, negative = [r for r in region_items if r['resource_type'] == 'ebs-volume'], 'encrypted', False
+            elif check.number == 20:
+                selected, key, negative = [r for r in region_items if r['resource_type'] in ('db-instance', 'db-cluster')], 'encrypted', False
+            elif check.number == 23:
+                selected, key, negative = [r for r in region_items if r['resource_type'] in ('db-instance', 'db-cluster')], 'deletion_protection', False
+            if key:
+                # For absent/unknown values retain MANUAL_REVIEW; never promote to PASS.
+                failed = [r for r in selected if
+                          (r['attributes'].get(key) == negative if negative is not None
+                           else bool(r['attributes'].get(key)))]
+                if failed:
+                    status = 'FAIL'
+                    detail = f'プロダクト関連リソース{len(failed)}件で明示的な基準未達を観測（関連リソースは共有の可能性あり）'
+                    evidence = [f"{r['resource_type']} {r['name']} ({r['resource_id']}): {key}={r['attributes'].get(key)}"
+                                for r in failed]
+                else:
+                    detail = f'対象リソース{len(selected)}件。未検出はPASSの証明ではない'
+            if not relevant:
+                status, detail = 'UNKNOWN', '対象リソースを特定できない。タグ/Name/収集権限/リージョンを確認'
+            output.append(Finding(check.number, status, region, detail, evidence))
+    return output
+
+
+def save_resource_inventory(out_dir, inventory):
+    folder = Path(out_dir).expanduser().resolve()
+    folder.mkdir(mode=0o700, parents=True, exist_ok=True)
+    suffix = uuid4().hex
+    json_path = folder / f'aws_resource_inventory_{suffix}.json'
+    csv_path = folder / f'aws_resource_inventory_{suffix}.csv'
+    _private_bytes(json_path, (json.dumps(inventory, ensure_ascii=False, sort_keys=True, indent=2) + '\n').encode('utf-8'))
+    cols = ['service', 'resource_type', 'region', 'resource_id', 'name', 'arn',
+            'attribution', 'attribution_evidence', 'tags', 'attributes']
+    data = StringIO()
+    writer = csv.DictWriter(data, fieldnames=cols)
+    writer.writeheader()
+    for resource in inventory['resources']:
+        line = {k: (json.dumps(resource[k], ensure_ascii=False, sort_keys=True)
+                    if k in ('tags', 'attributes') else resource.get(k, '')) for k in cols}
+        # Spreadsheet formula injection is possible even via CSV import.
+        for key, val in line.items():
+            if isinstance(val, str) and val.startswith(('=', '+', '-', '@', '\t', '\r', '\n')):
+                line[key] = "'" + val
+        writer.writerow(line)
+    _private_bytes(csv_path, ('\ufeff' + data.getvalue()).encode('utf-8'))
+    return [json_path, csv_path]
