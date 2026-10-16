@@ -568,7 +568,7 @@ def test_tls_only_known_weak_protocol_from_aws_can_raise_fail():
                 listeners=[{'protocol': 'HTTPS', 'port': 443,
                             'ssl_policy': 'unverified',
                             'weak_ssl_protocols': None}]),
-        _record('elbv2', 'application', region, 'ros-shared',
+        _record('elbv2', 'application', region, 'shared-other-project',
                 listeners=[{'protocol': 'HTTPS', 'port': 443,
                             'ssl_policy': 'legacy', 'ssl_protocols': ['TLSv1'],
                             'weak_ssl_protocols': ['TLSv1']}]),
