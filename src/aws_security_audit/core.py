@@ -50,7 +50,7 @@ def verdict(number: int, scope: str, tested: int, failures: list[str], ok_descri
     if not tested:
         return Finding(number, 'NOT_APPLICABLE', scope, '対象リソースがありません', evidence or [])
     if failures:
-        return Finding(number, 'FAIL', scope, f'{len(failures)}/{tested}件で基準未達', failures[:100] + (evidence or []))
+        return Finding(number, 'FAIL', scope, f'{len(failures)}/{tested}件で基準未達', failures + (evidence or []))
     return Finding(number, 'PASS', scope, f'{tested}件を確認: {ok_description}', evidence or [])
 
 

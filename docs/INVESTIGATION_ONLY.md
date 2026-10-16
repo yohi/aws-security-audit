@@ -61,3 +61,15 @@ LLM judgments are **advisory annotations**, never changes to original machine st
 ## Verification
 
 Unit tests use offline fake API responses. AWS production state is not changed, and CI does not authenticate to AWS. Actual account tests require the human operator to run the command and inspect its private outputs.
+
+
+## Resource inventory / product scope (draft, conservative)
+
+- `assess` exports `aws_resource_inventory_<uuid>.json/.csv` and a `リソース台帳` Excel sheet containing the available `Name` tag, resource ID, ARN, identity tags (Name/Product/Project/Application/Service/Environment/Owner), non-secret identifying attributes and scope attribution. The web handoff JSON includes the same resource inventory.
+- `--product scs2` selects exact `Product`/`Project`/`Application`/`Service` tag values `scs2` or identifier/Name prefix `scs2-`, `scs2_`, `scs2/`. It will **not** treat `scs20` as `scs2`.
+- `--product scs2 --product-tag Project=scs2` requires that explicit allowlisted identity tag (not arbitrary case-insensitive string matching). Product mode does not reproduce/account-wide errors across unrelated products.
+- EC2-linked EBS volumes and SGs may be included with `RELATED` attribution; this does **not** imply exclusive product ownership. VPC/subnet shared ownership is **not** inferred from EC2 links.
+- Product mode only asserts observed FAIL for #2/#5/#19/#20/#23 when the selected resource evidence explicitly supports it. All other 46 checks retain `MANUAL_REVIEW` or `UNKNOWN`; PASS is never asserted while incomplete matching/coverage remains. The account-wide scanner is **not invoked** in product mode.
+- IAM users/roles can have application-style names but are not definitively linked to a product from naming alone; S3/CloudFront and other global resources may require manual ownership validation. Inventory does not cover every AWS service. Errors or absent tags imply incomplete selection, not resource absence.
+- With all 46 account-wide checks, identity inventory collection adds AWS read traffic after the scanner; an expiring one-hour STS session can leave evidence incomplete. In that case, the inventory contains collection errors and must not be represented as fully comprehensive.
+- Exported files are local-only and may contain account infrastructure names/IDs; review before attaching to any Web LLM. No remediation / AWS write APIs or automated LLM calls are introduced.

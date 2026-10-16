@@ -18,6 +18,13 @@ NS = 'http://schemas.openxmlformats.org/spreadsheetml/2006/main'
 REL = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships'
 
 
+def _summary_preview(value: str) -> str:
+    """Only summary cells are shortened; findings JSON retains the complete evidence."""
+    if len(value) > 31000:
+        return value[:31000] + '\n[SUMMARY TRUNCATED — inspect findings JSON or web review for full evidence]'
+    return value
+
+
 def overall_rows(results: list[Finding], *, coverage_full: bool = False) -> list[dict]:
     by_id = {c.number: [] for c in CHECKS}
     for finding in results:
@@ -40,13 +47,16 @@ def overall_rows(results: list[Finding], *, coverage_full: bool = False) -> list
             '地域網羅': '全リージョン' if coverage_full else '一部リージョンのみ',
             '判定詳細': ('リージョン未網羅: アカウント全体のPASSは保留 | ' if account_status == 'UNKNOWN' and regional_status == 'PASS' else '') + (' | '.join(f'{f.scope}: {f.detail}' for f in findings) or '検査未実行'),
             '対象': ', '.join(f.scope for f in findings),
-            '証拠・要確認事項': '\n'.join(f'{f.scope}: {e}' for f in findings for e in f.evidence)[:32000],
+            '証拠・要確認事項': _summary_preview('\n'.join(f'{f.scope}: {e}' for f in findings for e in f.evidence)),
         })
     return output
 
 
 def _safe_spreadsheet(value: object) -> str:
     text = str(value if value is not None else '')
+    # Excel cells hold at most 32,767 characters; complete data remain in JSON.
+    if len(text) > 31000:
+        text = text[:31000] + '\\n[EXCEL CELL TRUNCATED — consult JSON for complete evidence]'
     if text.startswith(('=', '+', '-', '@', '\t', '\r', '\n')):
         return "'" + text
     return text
@@ -79,7 +89,7 @@ def _sheet_xml(matrix: list[list[str]], widths: list[float], *, filter_header: b
     return ET.tostring(worksheet, encoding='utf-8', xml_declaration=True)
 
 
-def _excel_bytes(rows: list[dict], details: list[dict], meta: dict) -> bytes:
+def _excel_bytes(rows: list[dict], details: list[dict], meta: dict, resources: list[dict] | None = None) -> bytes:
     wb = BytesIO()
     summary_keys = list(rows[0])
     detail_keys = ['No', 'scope', 'status', 'detail', 'evidence']
@@ -88,11 +98,21 @@ def _excel_bytes(rows: list[dict], details: list[dict], meta: dict) -> bytes:
         ([detail_keys] + [[str(d.get(k, '')) for k in detail_keys] for d in details], [8, 25, 19, 65, 78]),
         ([['項目', '値']] + [[k, str(v)] for k, v in meta.items()], [28, 100]),
     ]
+    resource_keys = ['service', 'resource_type', 'region', 'name', 'resource_id', 'arn',
+                     'attribution', 'attribution_evidence', 'tags', 'attributes']
+    resource_lines = []
+    for resource in resources or []:
+        resource_lines.append([
+            json.dumps(resource.get(key), ensure_ascii=False, sort_keys=True)
+            if key in ('tags', 'attributes') else str(resource.get(key, ''))
+            for key in resource_keys
+        ])
+    tables.append(([resource_keys] + resource_lines, [18, 22, 20, 42, 35, 72, 19, 48, 55, 70]))
     with ZipFile(wb, 'w', ZIP_DEFLATED) as arc:
-        arc.writestr('[Content_Types].xml', '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/><Override PartName="/xl/worksheets/sheet2.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/><Override PartName="/xl/worksheets/sheet3.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/></Types>')
+        arc.writestr('[Content_Types].xml', '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/><Override PartName="/xl/worksheets/sheet2.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/><Override PartName="/xl/worksheets/sheet3.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/><Override PartName="/xl/worksheets/sheet4.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/></Types>')
         arc.writestr('_rels/.rels', '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>')
-        arc.writestr('xl/workbook.xml', f'<?xml version="1.0" encoding="UTF-8" standalone="yes"?><workbook xmlns="{NS}" xmlns:r="{REL}"><sheets><sheet name="46項目サマリー" sheetId="1" r:id="rId1"/><sheet name="地域別証拠" sheetId="2" r:id="rId2"/><sheet name="実行メタデータ" sheetId="3" r:id="rId3"/></sheets></workbook>')
-        arc.writestr('xl/_rels/workbook.xml.rels', '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet2.xml"/><Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet3.xml"/><Relationship Id="rId4" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>')
+        arc.writestr('xl/workbook.xml', f'<?xml version="1.0" encoding="UTF-8" standalone="yes"?><workbook xmlns="{NS}" xmlns:r="{REL}"><sheets><sheet name="46項目サマリー" sheetId="1" r:id="rId1"/><sheet name="地域別証拠" sheetId="2" r:id="rId2"/><sheet name="実行メタデータ" sheetId="3" r:id="rId3"/><sheet name="リソース台帳" sheetId="4" r:id="rId4"/></sheets></workbook>')
+        arc.writestr('xl/_rels/workbook.xml.rels', '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet2.xml"/><Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet3.xml"/><Relationship Id="rId5" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/><Relationship Id="rId4" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet4.xml"/></Relationships>')
         arc.writestr('xl/styles.xml', f'<?xml version="1.0" encoding="UTF-8" standalone="yes"?><styleSheet xmlns="{NS}"><fonts count="2"><font><sz val="10"/><name val="Aptos"/></font><font><b/><sz val="10"/><color rgb="FFFFFFFF"/><name val="Aptos"/></font></fonts><fills count="3"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill><fill><patternFill patternType="solid"><fgColor rgb="FF153A59"/><bgColor indexed="64"/></patternFill></fill></fills><borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders><cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs><cellXfs count="2"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/><xf numFmtId="0" fontId="1" fillId="2" borderId="0" xfId="0" applyFont="1" applyFill="1"/></cellXfs></styleSheet>')
         for i, (matrix, widths) in enumerate(tables, 1):
             arc.writestr(f'xl/worksheets/sheet{i}.xml', _sheet_xml(matrix, widths))
@@ -113,7 +133,7 @@ def _private_bytes(path: Path, content: bytes) -> None:
             raise
 
 
-def export_report(out_dir: str, findings: list[Finding], metadata: dict) -> list[Path]:
+def export_report(out_dir: str, findings: list[Finding], metadata: dict, resource_inventory: dict | None = None) -> list[Path]:
     folder = Path(out_dir).expanduser().resolve()
     folder.mkdir(mode=0o700, parents=True, exist_ok=True)
     rows = overall_rows(findings, coverage_full=metadata.get('region_coverage_full') is True)
@@ -125,13 +145,16 @@ def export_report(out_dir: str, findings: list[Finding], metadata: dict) -> list
     basename = f'aws_security_audit_{stamp}'
     paths = [folder / (basename + ext) for ext in ('.json', '.csv', '.xlsx')]
     payload = {'metadata': metadata, 'summary': rows, 'findings': details}
+    if resource_inventory is not None:
+        payload['resource_inventory'] = resource_inventory
     json_data = json.dumps(payload, ensure_ascii=False, indent=2, default=str).encode('utf-8')
     textbuf = __import__('io').StringIO()
     writer = csv.DictWriter(textbuf, fieldnames=list(rows[0]))
     writer.writeheader()
     writer.writerows(rows)
     csv_data = ('\ufeff' + textbuf.getvalue()).encode('utf-8')
-    xlsx_data = _excel_bytes(rows, details, metadata)
+    xlsx_data = _excel_bytes(rows, details, metadata,
+                             resources=resource_inventory.get('resources', []) if resource_inventory else None)
     for path, content in zip(paths, (json_data, csv_data, xlsx_data)):
         _private_bytes(path, content)
     return paths
