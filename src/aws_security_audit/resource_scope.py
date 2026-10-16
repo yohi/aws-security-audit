@@ -458,12 +458,13 @@ PRODUCT_OBSERVATION_FIELDS = {
 }
 
 
-def product_observations(inventory, region, control):
+def product_observations(inventory, region, control, *, include_global=False):
     """Bounded-attribute evidence only; observation is not a PASS/FAIL decision."""
     fields_by_type = PRODUCT_OBSERVATION_FIELDS.get(control, {})
     observed = []
+    regions = (region, 'global') if include_global else (region,)
     for resource in inventory['resources']:
-        if resource['region'] not in (region, 'global'):
+        if resource['region'] not in regions:
             continue
         fields = fields_by_type.get(resource['resource_type'])
         if not fields:
@@ -590,7 +591,8 @@ def product_findings(inventory, regions):
                                 for r in failures]
                 else:
                     detail = f'対象リソース{len(selected)}件。未検出はPASSの証明ではない'
-            observations = product_observations(inventory, region, check.number)
+            observations = product_observations(inventory, region, check.number,
+                                                include_global=(region == regions[0]))
             if observations:
                 evidence = evidence + ['OBSERVED (not a PASS claim): ' + value for value in observations]
             if not relevant:
