@@ -17,6 +17,17 @@ jobs:
           python-version: ${{ matrix.python-version }}
       - name: Install dependencies
         run: uv sync --extra dev
+      - name: Record resolved dependency lock digest
+        run: sha256sum uv.lock > uv-lock.sha256
+      - name: Upload resolved dependency lock evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: dependency-lock-${{ matrix.python-version }}
+          path: |
+            uv.lock
+            uv-lock.sha256
+          retention-days: 14
+          if-no-files-found: error
       - name: Offline unit tests (no AWS credentials)
         run: uv run pytest -q
       - name: Build CLI package
