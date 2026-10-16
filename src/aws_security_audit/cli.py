@@ -333,12 +333,16 @@ def main(argv: list[str] | None = None) -> int:
             from .resource_scope import save_resource_inventory
             paths.extend(save_resource_inventory(args.out, inventory))
             if args.product:
+                from .resource_scope import product_deep_evidence
                 investigation = {
-                    'schema': 'aws-product-investigation-v1',
-                    'regions_checked': regions, 'deep_evidence': {},
+                    'schema': 'aws-product-investigation-v2',
+                    'regions_checked': regions,
+                    'deep_evidence': product_deep_evidence(inventory, regions),
+                    'collection_errors': inventory.get('collection_errors', []),
                     'limitations': [
                         'Account-wide 46 checks are NOT reused for product verdicts.',
-                        'Only selected direct observations (#2/#5/#19/#20/#23) can assert FAIL.',
+                        'Only selected direct negative observations (#2/#5/#19/#20/#23) can assert FAIL.',
+                        'Product #5/#19 supplemental evidence is PARTIAL and not the full account-mode examination.',
                         'No PASS is inferred when untagged/shared/unrelated resources could exist.',
                     ],
                 }
