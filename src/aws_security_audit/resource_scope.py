@@ -103,6 +103,39 @@ def _add_ec2(ctx, region, out, errors):
                        'operation': 'describe_snapshots', 'reason': str(exc)[:180]})
 
 
+def _rds_encryption_observation(record, flag_field):
+    """Interpret documented RDS encryption type before the legacy boolean flag.
+
+    StorageEncrypted=False is compatible with SSE-RDS (AWS-owned key).
+    If the type is absent and the flag is False, do not assert unencrypted.
+    A positive legacy flag is a positive encrypted observation, however.
+    Contradictory or unrecognized metadata remains UNKNOWN.
+    """
+    raw = record.get(flag_field)
+    mode = record.get('StorageEncryptionType')
+    if mode == 'none' and raw is not True:
+        encrypted, state = False, 'NOT_ENCRYPTED'
+    elif mode == 'none' and raw is True:
+        encrypted, state = None, 'CONFLICTING_EVIDENCE'
+    elif mode == 'sse-rds':
+        encrypted, state = True, 'ENCRYPTED'
+    elif mode == 'sse-kms' and raw is False:
+        encrypted, state = None, 'CONFLICTING_EVIDENCE'
+    elif mode == 'sse-kms':
+        encrypted, state = True, 'ENCRYPTED'
+    elif mode is None and raw is True:
+        encrypted, state = True, 'ENCRYPTED_LEGACY_FLAG'
+    else:
+        encrypted, state = None, 'UNVERIFIED_ENCRYPTION_TYPE'
+    return {
+        'encrypted': encrypted,
+        'encryption_state': state,
+        'encryption_flag_field': flag_field,
+        'encryption_flag': raw if type(raw) is bool else None,
+        'storage_encryption_type': mode if isinstance(mode, str) else None,
+    }
+
+
 def _add_rds(ctx, region, out, errors):
     rds = ctx.client_cached('rds', region)
     for db in paged(rds, 'describe_db_instances', 'DBInstances'):
@@ -111,7 +144,7 @@ def _add_rds(ctx, region, out, errors):
         if tags is None and arn:
             tags = _tagged(ctx, 'rds', region, arn, errors)
         out.append(_record('rds', 'db-instance', region, db['DBInstanceIdentifier'],
-                           arn=arn, tags=tags, encrypted=db.get('StorageEncrypted'),
+                           arn=arn, tags=tags, **_rds_encryption_observation(db, 'StorageEncrypted'),
                            publicly_accessible=db.get('PubliclyAccessible'),
                            deletion_protection=db.get('DeletionProtection'),
                            cluster_id=db.get('DBClusterIdentifier'), engine=db.get('Engine'),
@@ -123,7 +156,7 @@ def _add_rds(ctx, region, out, errors):
         if tags is None and arn:
             tags = _tagged(ctx, 'rds', region, arn, errors)
         out.append(_record('rds', 'db-cluster', region, db['DBClusterIdentifier'],
-                           arn=arn, tags=tags, encrypted=db.get('StorageEncrypted'),
+                           arn=arn, tags=tags, **_rds_encryption_observation(db, 'StorageEncrypted'),
                            deletion_protection=db.get('DeletionProtection'), engine=db.get('Engine'),
                            security_group_ids=[g.get('VpcSecurityGroupId')
                                                for g in db.get('VpcSecurityGroups', [])]))
@@ -139,7 +172,9 @@ def _add_rds(ctx, region, out, errors):
                                    arn=snap.get('DBSnapshotArn', '') or snap.get('DBClusterSnapshotArn', ''),
                                    tags=snap.get('TagList'),
                                    source_db_id=snap.get(parent_field),
-                                   encrypted=snap.get('Encrypted'),
+                                   **_rds_encryption_observation(
+                                       snap, 'Encrypted' if kind == 'db-snapshot' else 'StorageEncrypted'
+                                   ),
                                    snapshot_type=snap.get('SnapshotType')))
         except EvidenceUnavailable as exc:
             errors.append({'region': region, 'service': 'rds',
@@ -449,8 +484,10 @@ PRODUCT_OBSERVATION_FIELDS = {
          'ebs-snapshot': ('encrypted', 'source_volume_id')},
     20: {'db-instance': ('encrypted', 'engine'),
          'db-cluster': ('encrypted', 'engine'),
-         'db-snapshot': ('encrypted', 'source_db_id'),
-         'db-cluster-snapshot': ('encrypted', 'source_db_id')},
+         'db-snapshot': ('encrypted', 'encryption_state', 'encryption_flag',
+                         'encryption_flag_field', 'storage_encryption_type', 'source_db_id'),
+         'db-cluster-snapshot': ('encrypted', 'encryption_state', 'encryption_flag',
+                                 'encryption_flag_field', 'storage_encryption_type', 'source_db_id')},
     22: {'bucket': ('versioning_status', 'object_lock_enabled')},
     27: {'vpc': ('flow_logs',)},
     29: {'application': ('access_logs',)},
