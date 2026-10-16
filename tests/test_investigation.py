@@ -94,7 +94,7 @@ def test_ebs_state_asg_root_and_default():
             'describe_auto_scaling_instances': [{'InstanceId': 'i-test'}],
         }[operation]
 
-    with patch('aws_security_audit.investigation.paged', side_effect=fake_paged), \\
+    with patch('aws_security_audit.investigation.paged', side_effect=fake_paged), \
          patch('aws_security_audit.investigation.api_call',
                return_value={'EbsEncryptionByDefault': False}):
         out = investigate_ebs(StubCtx(), 'ap-northeast-1')
@@ -124,7 +124,7 @@ def test_asg_denied_is_unknown_not_non_asg():
             raise EvidenceUnavailable('AccessDenied')
         return {'describe_volumes': volumes, 'describe_instances': reservations}[operation]
 
-    with patch('aws_security_audit.investigation.paged', side_effect=fake_paged), \\
+    with patch('aws_security_audit.investigation.paged', side_effect=fake_paged), \
          patch('aws_security_audit.investigation.api_call',
                return_value={'EbsEncryptionByDefault': True}):
         out = investigate_ebs(StubCtx(), 'ap-northeast-1')
