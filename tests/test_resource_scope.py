@@ -179,3 +179,23 @@ def test_product_mode_never_runs_account_wide_scanner(monkeypatch):
     assert cli.main(['assess', '--product', 'scs2', '--llm', 'off',
                      '--role-arn', Ctx.expected_role_arn,
                      '--source-profile', 'default']) == 0
+
+
+def test_all_detected_evidence_is_preserved_beyond_old_100_item_cap(tmp_path):
+    from aws_security_audit.core import verdict
+    from aws_security_audit.report import overall_rows
+    evidence = [f'Resource-{i:03d}-' + 'a' * 300 for i in range(150)]
+    finding = verdict(22, 'ap-northeast-1', 160, evidence, '')
+    assert finding.status == 'FAIL'
+    assert len(finding.evidence) == 150
+    summaries = overall_rows([finding], coverage_full=True)
+    assert '[SUMMARY TRUNCATED' in summaries[21]['証拠・要確認事項']
+    meta = {'timestamp': '2026-10-16T06:00:00+00:00', 'region_coverage_full': True}
+    output = export_report(str(tmp_path), [finding], meta)
+    payload = json.loads(next(p for p in output if p.suffix == '.json').read_text())
+    assert len(payload['findings'][0]['evidence'].splitlines()) == 150
+    assert len(payload['summary'][21]['証拠・要確認事項']) < 32767
+    with ZipFile(next(p for p in output if p.suffix == '.xlsx')) as book:
+        assert book.testzip() is None
+        details_xml = book.read('xl/worksheets/sheet2.xml').decode('utf-8')
+        assert 'EXCEL CELL TRUNCATED' in details_xml
