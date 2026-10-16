@@ -121,7 +121,7 @@ def _add_rds(ctx, region, out, errors):
         arn = db.get('DBClusterArn', '')
         tags = db.get('TagList')
         if tags is None and arn:
-            tags = _tagged(ctx, 'rds', region, arn)
+            tags = _tagged(ctx, 'rds', region, arn, errors)
         out.append(_record('rds', 'db-cluster', region, db['DBClusterIdentifier'],
                            arn=arn, tags=tags, encrypted=db.get('StorageEncrypted'),
                            deletion_protection=db.get('DeletionProtection'), engine=db.get('Engine'),
@@ -179,7 +179,9 @@ def _add_elb(ctx, region, out, errors):
                                     'access_logs.s3.prefix')}),
         ):
             try:
-                response = api_call(elb, operation, LoadBalancerArn=arn)
+                response = ({'Listeners': paged(elb, operation, 'Listeners', LoadBalancerArn=arn)}
+                            if operation == 'describe_listeners'
+                            else api_call(elb, operation, LoadBalancerArn=arn))
                 observed[key] = extract(response)
             except EvidenceUnavailable as exc:
                 errors.append({'region': region, 'service': 'elbv2', 'operation': operation,
@@ -225,8 +227,33 @@ def _add_s3(ctx, out, errors):
                 errors.append({'region': 'global', 'service': 's3',
                                'operation': 'get_bucket_tagging', 'resource': name,
                                'reason': str(exc)[:180]})
+        observed = {}
+        for operation, name_key, extract, benign_errors in (
+            ('get_bucket_encryption', 'default_encryption_algorithms',
+             lambda r: sorted({rule.get('ApplyServerSideEncryptionByDefault', {}).get('SSEAlgorithm')
+                               for rule in r.get('ServerSideEncryptionConfiguration', {}).get('Rules', [])
+                               if rule.get('ApplyServerSideEncryptionByDefault', {}).get('SSEAlgorithm')}),
+             ('ServerSideEncryptionConfigurationNotFoundError',)),
+            ('get_public_access_block', 'bucket_public_access_block',
+             lambda r: r.get('PublicAccessBlockConfiguration'),
+             ('NoSuchPublicAccessBlockConfiguration',)),
+            ('get_bucket_versioning', 'versioning_status',
+             lambda r: r.get('Status', 'Disabled'), ()),
+            ('get_object_lock_configuration', 'object_lock_enabled',
+             lambda r: r.get('ObjectLockConfiguration', {}).get('ObjectLockEnabled') == 'Enabled',
+             ('ObjectLockConfigurationNotFoundError',)),
+        ):
+            try:
+                observed[name_key] = extract(api_call(s3, operation, Bucket=name))
+            except EvidenceUnavailable as exc:
+                if any(code in str(exc) for code in benign_errors):
+                    observed[name_key] = None
+                else:
+                    errors.append({'region': 'global', 'service': 's3',
+                                   'operation': operation, 'resource': name,
+                                   'reason': str(exc)[:180]})
         out.append(_record('s3', 'bucket', 'global', name, arn=f'arn:aws:s3:::{name}',
-                           tags=tags, name=name))
+                           tags=tags, name=name, **observed))
 
 
 def _add_iam(ctx, out, errors):
