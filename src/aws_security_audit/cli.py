@@ -291,7 +291,7 @@ def main(argv: list[str] | None = None) -> int:
                 if not sep or key not in ('Name', 'Product', 'Project', 'Application', 'Service') or not value:
                     raise AuditError('Expected --product-tag Key=Value with an approved identity tag key')
             if args.product and (len(args.product) > 128 or
-                                 any(c in args.product for c in '\\r\\n\\0')):
+                                 any(ord(c) < 32 for c in args.product):
                 raise AuditError('Invalid product identifier')
             from .resource_scope import collect_resource_inventory, product_findings
             if args.product:
