@@ -320,3 +320,37 @@ def test_product_deep_evidence_and_partial_observations_do_not_claim_pass():
     assert findings[19].status == 'FAIL'
     assert findings[22].status == 'MANUAL_REVIEW'
     assert findings[5].status == 'MANUAL_REVIEW'
+
+
+def test_cluster_tag_selects_untagged_aurora_members_and_preserves_availability_evidence():
+    region = 'ap-northeast-1'
+    resources = [
+        _record('rds', 'db-cluster', region, 'ros-data',
+                tags=[{'Key': 'Product', 'Value': 'ros'}],
+                deletion_protection=True),
+        _record('rds', 'db-instance', region, 'db-member-1',
+                cluster_id='ros-data', deletion_protection=False),
+        _record('rds', 'db-instance', region, 'other-db',
+                cluster_id='other-cluster', deletion_protection=False),
+    ]
+    selected, _ = attribute_resources(resources, 'ros')
+    assert {r['resource_id'] for r in selected} == {'ros-data', 'db-member-1'}
+    assert selected[1]['attribution'] == 'RELATED'
+    f = {e.number: e for e in product_findings({'resources': selected}, [region])}[23]
+    assert f.status == 'MANUAL_REVIEW'
+    assert any('member deletion remains possible' in e for e in f.evidence)
+
+
+def test_product_snapshots_are_assessed_without_fabricated_pass():
+    region = 'ap-northeast-1'
+    inv = {'resources': [
+        _record('ec2', 'ebs-snapshot', region, 'snap-1',
+                encrypted=False, source_volume_id='vol-ros'),
+        _record('rds', 'db-cluster-snapshot', region, 'db-snap-1',
+                encrypted=False, source_db_id='db-cluster-ros'),
+    ]}
+    results = {f.number: f for f in product_findings(inv, [region])}
+    assert results[19].status == 'FAIL'
+    assert 'snap-1' in results[19].evidence[0]
+    assert results[20].status == 'FAIL'
+    assert 'db-snap-1' in results[20].evidence[0]
