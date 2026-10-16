@@ -8,7 +8,7 @@ from uuid import uuid4
 from .report import _private_bytes
 
 
-def build_web_review_bundle(metadata: dict, rows: list[dict], findings: list, investigation: dict) -> dict:
+def build_web_review_bundle(metadata: dict, rows: list[dict], findings: list, investigation: dict, resource_inventory: dict | None = None) -> dict:
     """Combine original 46-control evidence and read-only deep observations into one uploadable JSON.
 
     No AWS API or external network call is made here. Identity metadata is
@@ -54,6 +54,15 @@ def build_web_review_bundle(metadata: dict, rows: list[dict], findings: list, in
             'requested_regions': metadata.get('requested_regions', []),
             'available_regions': metadata.get('available_regions', []),
             'region_coverage_full': metadata.get('region_coverage_full') is True,
+            'audit_scope': metadata.get('audit_scope', 'account'),
+            'product': metadata.get('product'),
+            'product_selector': metadata.get('product_selector'),
+            'product_attribution_complete': metadata.get('product_attribution_complete'),
+        },
+        'resource_inventory': resource_inventory or {
+            'schema': 'aws-security-resource-inventory-v1',
+            'scope': {'mode': 'not_collected'},
+            'resources': [], 'collection_errors': [],
         },
         'controls': controls,
         'supplemental_investigation': {
@@ -64,7 +73,8 @@ def build_web_review_bundle(metadata: dict, rows: list[dict], findings: list, in
         },
         'evidence_limitations': [
             'The original findings may contain capped lists; absence from evidence is not proof of absence.',
-            'Extra deterministic investigation currently exists for controls #5 and #19 only.',
+            'Extra deterministic investigation for account scope currently exists for controls #5 and #19 only.',
+            'Product scope uses conservative identity evidence; shared/untagged services and inherited resources may be omitted.',
             'All other 44 controls retain their original scanner evidence limitations.',
             'Partial-region results can never establish account-wide PASS.',
             'SG ingress and ENI attachments do not establish actual internet reachability.',
@@ -95,6 +105,9 @@ WEB_REVIEW_PROMPT = """あなたはAWSセキュリティ監査の独立した調
 
 【調査作業】
 1. JSONのスキーマ、対象リージョン、収集時刻、46項目の有無、証拠収集範囲を確認する。
+   execution.audit_scope が product の場合は、アカウント全体と区別し、プロダクト範囲の帰属未確定を明記する。
+   resource_inventory のName・resource_id・ARN・識別タグ・帰属根拠を一覧/突合する。
+   product スコープで記録されたFAILは明示されたリソースに限定し、未収集リソースのPASSを推定しない。
 2. 46項目の判定をすべて一覧化し、元の判定を保持する。
 3. 各FAILについて、観測された設定とセキュリティ上の影響を分けて評価し、
    実際に証明されたこと／未証明のこと／誤検知の可能性を区別する。
@@ -105,6 +118,7 @@ WEB_REVIEW_PROMPT = """あなたはAWSセキュリティ監査の独立した調
 【出力】
 - 監査スコープと実行メタデータ
 - 46項目の判定一覧（No、項目名、元判定、根拠、未確認事項）
+- リソース別台帳（サービス、リージョン、Name、ID/ARN、識別タグ、プロダクト帰属、未判定範囲）
 - 検出事項の証拠評価、誤検知・過大評価の可能性
 - 未確認項目と証拠不足の整理
 - #5と#19の追加分析
