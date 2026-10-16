@@ -670,3 +670,128 @@ def test_s3_bucket_object_lock_configuration_not_found_is_false_only_on_known_er
     assert 'object_lock_enabled' not in out[0]['attributes']
     finding = {f.number: f for f in product_findings({'resources': out}, ['ap-northeast-1'])}[22]
     assert finding.status == 'MANUAL_REVIEW'
+
+
+def test_resource_property_matrix_surfaces_ok_fail_unknown_without_46_control_pass():
+    from aws_security_audit.control_observations import (
+        build_product_observations, PROPERTY_OK, PROPERTY_FAIL, PROPERTY_UNKNOWN,
+    )
+    region = 'ap-northeast-1'
+    resources = [
+        _record('rds', 'db-instance', region, 'rds-ros',
+                tags=[{'Key': 'Product', 'Value': 'ros'}],
+                publicly_accessible=False, encrypted=True, cluster_id='ros-cluster'),
+        _record('rds', 'db-cluster', region, 'ros-cluster',
+                tags=[{'Key': 'Product', 'Value': 'ros'}],
+                deletion_protection=True, encrypted=True),
+        _record('s3', 'bucket', 'global', 'ros-media',
+                tags=[{'Key': 'Product', 'Value': 'ros'}],
+                default_encryption_algorithms=['AES256'],
+                bucket_public_access_block={
+                    'BlockPublicAcls': True, 'IgnorePublicAcls': True,
+                    'BlockPublicPolicy': True, 'RestrictPublicBuckets': True,
+                },
+                versioning_status='Disabled', object_lock_enabled=False),
+        _record('ec2', 'ebs-volume', region, 'vol-ros',
+                tags=[{'Key': 'Product', 'Value': 'ros'}], encrypted=False),
+        _record('elbv2', 'application', region, 'ros-web',
+                tags=[{'Key': 'Product', 'Value': 'ros'}],
+                listeners=[{
+                    'protocol': 'HTTPS', 'port': 443, 'ssl_policy': 'legacy',
+                    'ssl_protocol_evidence': 'API_VERIFIED',
+                    'ssl_protocols': ['TLSv1', 'TLSv1.2'],
+                    'weak_ssl_protocols': ['TLSv1'],
+                }]),
+        _record('elbv2', 'application', region, 'ros-unknown',
+                tags=[{'Key': 'Product', 'Value': 'ros'}],
+                listeners=[{
+                    'protocol': 'HTTPS', 'port': 443, 'ssl_policy': 'unknown',
+                    'ssl_protocol_evidence': 'UNVERIFIED',
+                    'ssl_protocols': None, 'weak_ssl_protocols': None,
+                }]),
+    ]
+    selected, scope = attribute_resources(resources, 'ros')
+    inv = {'resources': selected, 'scope': scope, 'collection_errors': []}
+    obs = build_product_observations(inv, [region])
+    assert len(obs['by_control']) == 46
+    assert obs['by_control']['2']['ok'] == 1
+    assert obs['by_control']['17']['ok'] == 1
+    assert obs['by_control']['18']['ok'] == 1
+    assert obs['by_control']['19']['fail'] == 1
+    assert obs['by_control']['20']['ok'] == 2
+    assert obs['by_control']['22']['fail'] == 1
+    assert obs['by_control']['23']['ok'] == 1
+    assert obs['by_control']['16']['fail'] == 1
+    assert obs['by_control']['16']['unknown'] == 1
+    assert obs['by_control']['40']['evidence_state'] == 'NO_RESOURCE_EVIDENCE'
+    assert all(not row['product_wide_pass_proven'] for row in obs['by_control'].values())
+    assert {r['property_result'] for r in obs['rows']} >= {
+        PROPERTY_OK, PROPERTY_FAIL, PROPERTY_UNKNOWN,
+    }
+
+    control_findings = product_findings(inv, [region])
+    assert {f.number: f for f in control_findings}[17].status == 'MANUAL_REVIEW'
+    assert {f.number: f for f in control_findings}[18].status == 'MANUAL_REVIEW'
+    assert {f.number: f for f in control_findings}[19].status == 'FAIL'
+    assert {f.number: f for f in control_findings}[20].status == 'MANUAL_REVIEW'
+
+
+def test_observed_property_results_appear_in_json_csv_xlsx_and_web(tmp_path):
+    from aws_security_audit.control_observations import build_product_observations
+    from aws_security_audit.report import overall_rows
+    region = 'ap-northeast-1'
+    resources = [
+        _record('s3', 'bucket', 'global', 'ros-data',
+                tags=[{'Key': 'Product', 'Value': 'ros'}],
+                default_encryption_algorithms=['AES256'],
+                versioning_status='Enabled', object_lock_enabled=False),
+    ]
+    selected, scope = attribute_resources(resources, 'ros')
+    inventory = {'resources': selected, 'scope': scope, 'collection_errors': []}
+    inventory['control_observations'] = build_product_observations(inventory, [region])
+    controls = [Finding(c.number, 'MANUAL_REVIEW', region, 'not verified') for c in CHECKS]
+    metadata = {
+        'timestamp': '2026-10-16T06:00:00+00:00',
+        'region_coverage_full': False,
+        'audit_scope': 'product', 'product': 'ros',
+    }
+    output = export_report(str(tmp_path), controls, metadata, resource_inventory=inventory)
+    payload = json.loads(next(p for p in output if p.suffix == '.json').read_text())
+    assert payload['summary'][16]['判定'] == 'MANUAL_REVIEW'
+    assert payload['summary'][16]['確認済み属性OK'] == 1
+    assert payload['summary'][16]['確認済み属性NG'] == 0
+    assert payload['control_observations']['by_control']['17']['ok'] == 1
+
+    csv_report = next(p for p in output if p.suffix == '.csv')
+    with csv_report.open(encoding='utf-8-sig') as stream:
+        rows = list(csv.DictReader(stream))
+    assert len(rows) == 46
+    assert rows[16]['確認済み属性OK'] == '1'
+    assert rows[16]['判定'] == 'MANUAL_REVIEW'
+
+    book = next(p for p in output if p.suffix == '.xlsx')
+    with ZipFile(book) as zip_file:
+        assert zip_file.testzip() is None
+        assert 'xl/worksheets/sheet5.xml' in zip_file.namelist()
+        assert 'PROPERTY_OK' in zip_file.read('xl/worksheets/sheet5.xml').decode()
+        assert '属性別検証結果' in zip_file.read('xl/workbook.xml').decode()
+
+    overall = overall_rows(controls, coverage_full=False,
+                           observations=inventory['control_observations'])
+    bundle = build_web_review_bundle(metadata, overall, controls, {}, inventory)
+    assert bundle['controls'][16]['observed_property_summary']['property_ok'] == 1
+    assert bundle['controls'][16]['account_status'] == 'MANUAL_REVIEW'
+    assert bundle['resource_inventory']['control_observations']['rows']
+
+
+def test_non_product_report_keeps_existing_four_sheet_contract(tmp_path):
+    region = 'ap-northeast-1'
+    records = [Finding(c.number, 'MANUAL_REVIEW', region, 'not verified') for c in CHECKS]
+    metadata = {'timestamp': '2026-10-16T06:00:00+00:00',
+                'region_coverage_full': False}
+    output = export_report(str(tmp_path), records, metadata)
+    book = next(p for p in output if p.suffix == '.xlsx')
+    with ZipFile(book) as zip_file:
+        assert zip_file.testzip() is None
+        assert 'xl/worksheets/sheet4.xml' in zip_file.namelist()
+        assert 'xl/worksheets/sheet5.xml' not in zip_file.namelist()
