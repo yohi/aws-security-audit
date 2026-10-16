@@ -522,10 +522,9 @@ def collect_resource_inventory(ctx, regions, product=None, product_tag=None):
         shared = collect_shared_security_evidence(ctx, regions, errors)
     scope['service_counts'] = dict(Counter(r['service'] for r in selected))
     scope['collection_errors'] = len(errors)
-    return {'schema': 'aws-security-resource-inventory-v1',
-            'scope': scope, 'regions_requested': list(regions),
-            'resources': selected, 'shared_control_evidence': shared,
-            'collection_errors': errors,
+    report = {'schema': 'aws-security-resource-inventory-v1',
+              'scope': scope, 'regions_requested': list(regions),
+              'resources': selected, 'collection_errors': errors,
             'limitations': [
                 'Not all AWS services and resource types are inventoried.',
                 'Resource identity tags are a restricted allowlist, not full tag payloads.',
@@ -534,6 +533,9 @@ def collect_resource_inventory(ctx, regions, product=None, product_tag=None):
                 'Name-prefix attribution is heuristic; untagged/shared resources may be omitted.',
                 'Resource inventory is not a replacement for per-control security assessment.',
             ]}
+    if shared is not None:
+        report['shared_control_evidence'] = shared
+    return report
 
 
 PRODUCT_OBSERVATION_FIELDS = {
