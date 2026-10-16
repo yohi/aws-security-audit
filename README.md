@@ -94,3 +94,45 @@ A fixed Git commit SHA is recommended for reproducibility. `uvx --from git+ssh` 
 - F-004: partial regions preserve regional findings but prevent account-wide PASS, including CSV/XLSX/JSON summaries.
 - F-005: zero AP tag matches while active EC2 instances exist returns MANUAL_REVIEW instead of NOT_APPLICABLE.
 - Static regression tests do not replace actual AWS integration or independent proof of effective IAM write restrictions.
+
+## STS-001 security review correction
+
+The SDK's **active** credential provider is verified before STS. Profiles with `login_session` but overridden by static shared credentials, environment credentials or other providers are rejected, without reading or logging secret values.
+
+`doctor` distinguishes `IDENTITY_VERIFIED`, `REGION_VERIFIED` and `READ_API_VERIFIED` for sampled IAM, S3, EC2, CloudTrail and RDS operations. Its success does **not** establish all 46 permissions or no-write authorization. It always reports `EFFECTIVE_NO_WRITE=NOT_PROVEN`. `policy-evidence --out ./reports` compares GetPolicy → GetPolicyVersion → GetPolicy, requiring matching policy identity/default version and IsDefaultVersion=True. It saves the full Boto3-returned policy document, normalized JSON, SHA-256 and observation timestamps to a new private (0600) JSON file; stdout reports only digest and path. Detectable version changes abort without persisting evidence. This is a NON-ATOMIC observational snapshot, not proof of IAM No-Write permissions. No AWS policy is edited.
+
+See [STS-001 No-Write verification contract](docs/STS001_NO_WRITE_CONTRACT.md). Runtime direct packages are version-pinned; transitive artifact hashes and `uvx git+ssh` consumer reproducibility remain open. AWS integration: NOT TESTED; IAM effective No-Write: NOT PROVEN; production approval: NOT GRANTED.
+
+## STS2-004 — dependency reproducibility (review candidate)
+
+The previously generated CI artifact lockfile for Python 3.12 and Python 3.13 had **identical bytes and SHA-256**, independently recomputed from both archived `uv.lock` files:
+
+```text
+9a6335dc59dc7c4260fa1d2e337de0b9bddfcc4de51ff8335772354d0b6663d0  uv.lock
+```
+
+The resulting `uv.lock` is now **committed** with its checksum in `docs/uv-lock.sha256`. CI checks this exact checksum before and after `uv lock --check`, installs with `uv sync --locked --extra dev`, and runs tests with `uv run --locked`. These controls detect unreviewed lock edits and stale lock metadata in CI, but not all risks from the index, tools, build backends or compromised endpoint hosts.
+
+**Convenience execution (unchanged):**
+
+```bash
+uvx --from 'git+ssh://git@github.com/yohi/aws-security-audit.git@VERIFIED_COMMIT_SHA' aws-security-audit version
+```
+
+This remains *unlocked from the consumer's perspective*: `uvx --from git+ssh` **does not enforce the source repository's uv.lock**, and uv's `--require-hashes` mode does not accept Git dependencies. Never claim STS2-004 fully passed for this convenience path.
+
+**Stronger consumer install path (requires Git checkout):**
+
+```bash
+git clone git@github.com:yohi/aws-security-audit.git
+cd aws-security-audit
+git checkout --detach VERIFIED_COMMIT_SHA
+test "$(git rev-parse HEAD)" = "VERIFIED_COMMIT_SHA"
+sha256sum -c docs/uv-lock.sha256
+uv sync --locked --no-dev --no-editable
+uv run --locked --no-sync aws-security-audit version
+# After separately completing IAM approvals and STS verification:
+# uv run --locked --no-sync aws-security-audit doctor --source-profile audit-source --role-arn arn:aws:iam::123456789012:role/EXISTING_AUDIT_ROLE --regions ap-northeast-1
+```
+
+Use a **reviewed, signed-off commit SHA** rather than a moving branch or tag. An actual independent user-side run, platform/architecture evaluation, build-tool pin/hash review and dependency artifact verification remain necessary before closing STS2-004. Neither installation path is an OS sandbox: the process can access host AWS login credentials.

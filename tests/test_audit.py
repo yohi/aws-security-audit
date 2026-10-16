@@ -107,6 +107,7 @@ def test_explicit_sts_session_policy_and_identity_guard(monkeypatch):
     role = 'arn:aws:iam::123456789012:role/SecurityAuditReadOnlyRole'
     source = MagicMock()
     source._session.get_scoped_config.return_value = {'login_session': 'arn:aws:iam::123456789012:user/alice'}
+    source.get_credentials.return_value.method = 'login'
     source_sts = MagicMock()
     source_sts.assume_role.return_value = {'Credentials': {
         'AccessKeyId': 'ASIA_NOT_A_REAL_KEY',

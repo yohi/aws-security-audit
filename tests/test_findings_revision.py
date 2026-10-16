@@ -142,6 +142,7 @@ def test_sts_assume_failure_blocks_scan(monkeypatch):
     from botocore.exceptions import ClientError
     source = MagicMock()
     source._session.get_scoped_config.return_value = {'login_session': 'example'}
+    source.get_credentials.return_value.method = 'login'
     source.client.return_value.assume_role.side_effect = ClientError({'Error': {'Code': 'AccessDenied', 'Message': 'forbidden'}}, 'AssumeRole')
     factory = MagicMock(return_value=source)
     monkeypatch.setattr(boto3, 'Session', factory)
