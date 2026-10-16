@@ -140,17 +140,24 @@ def test_doctor_denied_read_api_cannot_claim_success(capsys):
     assert 'DO_NOT_LOG' not in out
 
 
-def test_readonly_policy_evidence_has_version_and_canonical_digest(capsys):
+def test_readonly_policy_evidence_has_version_and_canonical_digest(tmp_path, capsys):
     import hashlib
     mock_ctx = MagicMock()
     mock_ctx.region = REGION
     iam = mock_ctx.client_cached.return_value
     document = {'Statement': [{'Effect': 'Allow', 'Action': ['s3:Get*']}], 'Version': '2012-10-17'}
-    iam.get_policy.return_value = {'Policy': {'DefaultVersionId': 'v190'}}
-    iam.get_policy_version.return_value = {'PolicyVersion': {'Document': document}}
-    assert cli.policy_evidence(mock_ctx) == 0
+    policy = {'Arn': 'arn:aws:iam::aws:policy/ReadOnlyAccess',
+              'PolicyId': 'ANPAFAKEPOLICYID', 'DefaultVersionId': 'v190'}
+    iam.get_policy.side_effect = [{'Policy': policy}, {'Policy': policy}]
+    iam.get_policy_version.return_value = {'PolicyVersion': {
+        'Document': document, 'VersionId': 'v190', 'IsDefaultVersion': True}}
+    assert cli.policy_evidence(mock_ctx, out=str(tmp_path)) == 0
     output = json.loads(capsys.readouterr().out)
+    evidence = json.loads(next(tmp_path.glob('readonlyaccess-policy-*.json')).read_text())
     assert output['policy_version'] == 'v190'
     canonical = json.dumps(document, ensure_ascii=False, sort_keys=True, separators=(',', ':')).encode('utf-8')
     assert output['policy_sha256_canonical_json'] == hashlib.sha256(canonical).hexdigest()
+    assert evidence['policy_document_as_returned_by_boto3'] == document
+    assert evidence['policy_document'] == document
     assert output['effective_no_write'] == 'NOT_PROVEN'
+    assert iam.get_policy.call_count == 2

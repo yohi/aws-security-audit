@@ -35,3 +35,10 @@ All five findings accepted. Added offline regressions for failed/missing CloudTr
 - STS2-004: direct dependency pins and read-only policy version + canonical SHA-256 evidence; transitive uvx hash assurance still OPEN.
 - STS2-005: offline regression tests for static source mixing, account/role mismatches, invalid region, AssumeRole failure and doctor failure.
 - AWS environment and effective IAM authorization **NOT PROVEN**.
+
+## STS3-NEW-001 targeted correction (PR #3)
+
+- Require GetPolicy before and after GetPolicyVersion with stable policy ARN, PolicyId, DefaultVersionId and IsDefaultVersion=True at the intermediate read; mismatch = EvidenceUnavailable (Fail Closed, no persisted evidence).
+- Save original Boto3-returned document and normalized document, deterministic canonical JSON SHA-256 and timestamps in private 0600 evidence; preserve non-atomic / potential ABA limitation.
+- Add positive and negative mocks for original-document retention, version mismatch, default flag False/missing, PolicyId drift and failure to persist. The CI result for the new fixed HEAD is separate from the earlier 48-test CI.
+- Warn that resource-based policy exceptions mean STS session policy intersection is not universal No-Write proof. STS2-004 transitive/uvx reproducibility remains OPEN; IAM effective No-Write NOT PROVEN, AWS live NOT TESTED.
