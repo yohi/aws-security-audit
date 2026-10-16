@@ -34,7 +34,7 @@ def check_1(ctx: AuditContext, region: str, options: dict) -> Finding:
     if not instances:
         if inventory:
             return manual(1, region, 'APタグに一致するEC2がありません。対象APサーバーの特定・タグ設定を確認してください', [f'指定タグ: {tag}', f'稼働中EC2: {len(inventory)}台', 'APサーバーが存在しないことは未証明'])
-        return Finding(1, 'NOT_APPLICABLE', region, '稼働中EC2が存在しません。EC2以外のAPは対象外')
+        return manual(1, region, '稼働中EC2がありません。EC2以外を含めたAPサーバーの有無・配置の確認が必要', ['稼働中EC2: 0台'])
     return manual(1, region, 'APサーバーのPublic IPは検査済み。プライベートサブネットの経路表を追加確認', [f'タグ一致: {len(instances)}台'])
 
 

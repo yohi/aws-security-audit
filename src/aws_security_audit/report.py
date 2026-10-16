@@ -18,7 +18,7 @@ NS = 'http://schemas.openxmlformats.org/spreadsheetml/2006/main'
 REL = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships'
 
 
-def overall_rows(results: list[Finding], *, coverage_full: bool = True) -> list[dict]:
+def overall_rows(results: list[Finding], *, coverage_full: bool = False) -> list[dict]:
     by_id = {c.number: [] for c in CHECKS}
     for finding in results:
         by_id[finding.number].append(finding)
@@ -116,7 +116,7 @@ def _private_bytes(path: Path, content: bytes) -> None:
 def export_report(out_dir: str, findings: list[Finding], metadata: dict) -> list[Path]:
     folder = Path(out_dir).expanduser().resolve()
     folder.mkdir(mode=0o700, parents=True, exist_ok=True)
-    rows = overall_rows(findings, coverage_full=metadata.get('region_coverage_full') is not False)
+    rows = overall_rows(findings, coverage_full=metadata.get('region_coverage_full') is True)
     details = [r.to_dict() for r in findings]
     for row in details:
         row['No'] = row.pop('number')

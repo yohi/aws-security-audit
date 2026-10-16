@@ -132,9 +132,9 @@ def test_unmatched_ap_tag_with_ec2_manual():
     assert finding.status == 'MANUAL_REVIEW' and 'タグ' in finding.detail
 
 
-def test_no_ec2_ap_not_applicable():
+def test_no_ec2_ap_requires_manual():
     ctx = FakeContext(ec2=_client({'describe_instances': {'Reservations': []}}))
-    assert checks.check_1(ctx, REGION, {'ap_tag': 'Role=app'}).status == 'NOT_APPLICABLE'
+    assert checks.check_1(ctx, REGION, {'ap_tag': 'Role=app'}).status == 'MANUAL_REVIEW'
 
 
 def test_sts_assume_failure_blocks_scan(monkeypatch):
