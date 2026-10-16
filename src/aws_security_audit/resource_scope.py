@@ -282,7 +282,12 @@ def collect_resource_inventory(ctx, regions, product=None, product_tag=None):
 
 
 def product_findings(inventory, regions):
-    """46 conservative product findings. No account-wide verdict is inherited."""
+    """Emit conservative, product-scoped findings; keep account-level status separate.
+
+    Aurora data protection is a DB *cluster* property. Its DB instances may be
+    deleted while the cluster/volume remains protected. This is distinct from
+    standalone RDS DB instances and from availability protection.
+    """
     by_region = {}
     for resource in inventory['resources']:
         by_region.setdefault(resource['region'], []).append(resource)
@@ -293,7 +298,7 @@ def product_findings(inventory, regions):
         relevant = region_items + (global_items if region == regions[0] else [])
         for check in CHECKS:
             status = 'MANUAL_REVIEW'
-            detail = 'プロダクト限定の既存46項目判定ロジックは未実装。帰属・共有・未タグ対象の確認が必要'
+            detail = '製品単位の判定には追加の紐付け/共通基盤証拠が必要'
             evidence = []
             selected = []
             key = None
@@ -307,24 +312,50 @@ def product_findings(inventory, regions):
             elif check.number == 20:
                 selected, key, negative = [r for r in region_items if r['resource_type'] in ('db-instance', 'db-cluster')], 'encrypted', False
             elif check.number == 23:
-                selected, key, negative = [r for r in region_items if r['resource_type'] in ('db-instance', 'db-cluster')], 'deletion_protection', False
-            if key:
-                # For absent/unknown values retain MANUAL_REVIEW; never promote to PASS.
-                failed = [r for r in selected if
-                          (r['attributes'].get(key) == negative if negative is not None
-                           else bool(r['attributes'].get(key)))]
-                if failed:
+                clusters = {r['resource_id']: r for r in region_items if r['resource_type'] == 'db-cluster'}
+                instances = [r for r in region_items if r['resource_type'] == 'db-instance']
+                standalone = [r for r in instances if not r['attributes'].get('cluster_id')]
+                selected = list(clusters.values()) + standalone
+                failures = [r for r in selected if r['attributes'].get('deletion_protection') is False]
+                missing_parents = [r for r in instances if
+                                   r['attributes'].get('cluster_id') and
+                                   r['attributes']['cluster_id'] not in clusters]
+                if failures:
                     status = 'FAIL'
-                    detail = f'プロダクト関連リソース{len(failed)}件で明示的な基準未達を観測（関連リソースは共有の可能性あり）'
+                    detail = f'削除保護無効なDBクラスターまたは独立RDSインスタンス: {len(failures)}件'
+                    evidence = [f"{r['resource_type']} {r['name']} ({r['resource_id']}): deletion_protection=False"
+                                for r in failures]
+                else:
+                    detail = (f'対象クラスター/独立DB {len(selected)}件で削除保護の無効状態は未検出。'
+                              'データ保護とDBインスタンス削除による可用性は別基準')
+                evidence += [f"Aurora cluster {r['name']} ({r['resource_id']}): deletion_protection={r['attributes'].get('deletion_protection')}"
+                             for r in clusters.values()]
+                evidence += [f"Aurora instance {r['name']} ({r['resource_id']}): "
+                             f"parent_cluster={r['attributes']['cluster_id']}; "
+                             f"instance_deletion_protection={r['attributes'].get('deletion_protection')}; "
+                             "member deletion remains possible despite cluster protection"
+                             for r in instances if r['attributes'].get('cluster_id')]
+                if missing_parents:
+                    detail += f'。親クラスターの証拠不在{len(missing_parents)}件'
+                if not relevant:
+                    status, detail = 'UNKNOWN', '対象リソースを特定できない。タグ/Name/収集権限/リージョンを確認'
+                output.append(Finding(check.number, status, region, detail, evidence))
+                continue
+            if key:
+                failures = [r for r in selected if
+                            (r['attributes'].get(key) is negative if negative is not None
+                             else bool(r['attributes'].get(key)))]
+                if failures:
+                    status = 'FAIL'
+                    detail = f'プロダクト関連リソース{len(failures)}件で明示的な基準未達を観測（関連リソースは共有の可能性あり）'
                     evidence = [f"{r['resource_type']} {r['name']} ({r['resource_id']}): {key}={r['attributes'].get(key)}"
-                                for r in failed]
+                                for r in failures]
                 else:
                     detail = f'対象リソース{len(selected)}件。未検出はPASSの証明ではない'
             if not relevant:
                 status, detail = 'UNKNOWN', '対象リソースを特定できない。タグ/Name/収集権限/リージョンを確認'
             output.append(Finding(check.number, status, region, detail, evidence))
     return output
-
 
 def save_resource_inventory(out_dir, inventory):
     folder = Path(out_dir).expanduser().resolve()
