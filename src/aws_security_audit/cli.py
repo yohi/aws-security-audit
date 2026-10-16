@@ -40,7 +40,7 @@ def parser() -> argparse.ArgumentParser:
             cmd.add_argument('--fail-on-findings', action='store_true', help='Exit 2 if FAIL or UNKNOWN exists')
         if name == 'assess':
             cmd.add_argument('--llm', choices=('off', 'export'), default='export',
-                             help='Export privacy-reduced offline review packet; never sends to an LLM')
+                             help='Generate a JSON attachment and copy/paste prompt for ChatGPT/Gemini Web; no upload')
     sub.add_parser('version', help='Show package version')
     return p
 
@@ -296,9 +296,14 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == 'assess':
             from .investigation import build_investigation, save_investigation
             investigation = build_investigation(ctx, regions, overview, records)
-            paths.extend(save_investigation(
-                args.out, investigation, llm_export=args.llm == 'export',
-            ))
+            paths.extend(save_investigation(args.out, investigation, llm_export=False))
+            if args.llm == 'export':
+                from .web_handoff import build_web_review_bundle, save_web_handoff
+                bundle = build_web_review_bundle(metadata, overview, records, investigation)
+                paths.extend(save_web_handoff(args.out, bundle))
+                print('WEB HANDOFF: attach aws_web_review_*.json to ChatGPT/Gemini Web and paste aws_web_prompt_*.md', flush=True)
+                print('SENSITIVE DATA NOTICE: inspect the attachment before uploading; it contains original finding evidence', flush=True)
+                print('No file was uploaded and no LLM API was called', flush=True)
         if not full_coverage:
             print('WARNING: partial region coverage; full-account PASS is withheld', flush=True)
         print('Summary: ' + ', '.join(f'{name}={counts[name]}' for name in ('PASS', 'FAIL', 'UNKNOWN', 'MANUAL_REVIEW', 'NOT_APPLICABLE')))
