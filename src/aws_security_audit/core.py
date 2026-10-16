@@ -120,6 +120,16 @@ class AuditContext:
             raise AuditError('Source profile must be aws login (or SSO), not an AssumeRole profile')
         if not (source_config.get('login_session') or source_config.get('sso_session') or source_config.get('sso_start_url')):
             raise AuditError('Source profile must be configured for aws login or IAM Identity Center; static key profiles are rejected')
+        # A login_session config field cannot prove the active credential provider.
+        # Shared keys and other credential providers can take precedence.
+        # Inspect provider provenance only; do not access or log key values.
+        credentials = source.get_credentials()
+        method = getattr(credentials, 'method', None)
+        login = bool(source_config.get('login_session'))
+        sso = bool(source_config.get('sso_session') or source_config.get('sso_start_url'))
+        allowed = {'login'} if login and not sso else {'sso'} if sso and not login else set()
+        if method not in allowed:
+            raise AuditError('Credential provider does not match declared login/SSO source; STS not attempted')
         assumed = api_call(
             source.client('sts'), 'assume_role',
             RoleArn=expected_role_arn,
