@@ -42,3 +42,10 @@ All five findings accepted. Added offline regressions for failed/missing CloudTr
 - Save original Boto3-returned document and normalized document, deterministic canonical JSON SHA-256 and timestamps in private 0600 evidence; preserve non-atomic / potential ABA limitation.
 - Add positive and negative mocks for original-document retention, version mismatch, default flag False/missing, PolicyId drift and failure to persist. The CI result for the new fixed HEAD is separate from the earlier 48-test CI.
 - Warn that resource-based policy exceptions mean STS session policy intersection is not universal No-Write proof. STS2-004 transitive/uvx reproducibility remains OPEN; IAM effective No-Write NOT PROVEN, AWS live NOT TESTED.
+
+## STS2-004 CI-resolved lock comparison
+
+- Obtained the Python 3.12 and 3.13 dependency-lock artifacts from [Actions #38853564217](https://github.com/yohi/aws-security-audit/actions/runs/38853564217). Both have identical `uv.lock` content and the independently computed SHA-256 `9a6335dc59dc7c4260fa1d2e337de0b9bddfcc4de51ff8335772354d0b6663d0`.
+- Commit this lock as `uv.lock` with `docs/uv-lock.sha256`, and CI now checks content checksum and `uv lock --check` before `uv sync --locked --extra dev`.
+- This improves reproducibility for checked-out, locked project environments. It **does not** make regular `uvx + git+ssh` installations hash-locked. Consumer verification on supported OS/architecture and secure build dependency pinning remain OPEN.
+- No AWS real-environment authorization checks were performed. IAM effective No-Write NOT PROVEN, Issue #2 OPEN, PR #3 Draft.
