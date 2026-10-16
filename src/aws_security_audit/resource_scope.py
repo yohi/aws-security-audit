@@ -40,14 +40,16 @@ def _record(service, kind, region, identifier, arn='', tags=None, name='', **att
     }
 
 
-def _tagged(ctx, service, region, arn, key='TagList'):
+def _tagged(ctx, service, region, arn, errors, key='TagList'):
     try:
         return api_call(ctx.client_cached(service, region), 'list_tags_for_resource', ResourceName=arn).get(key, [])
-    except EvidenceUnavailable:
-        return []  # Scope must remain incomplete if resource tags cannot be established.
+    except EvidenceUnavailable as exc:
+        errors.append({'region': region, 'service': service, 'operation': 'list_tags_for_resource',
+                       'resource': arn, 'reason': str(exc)[:180]})
+        return []  # Explicit uncertainty; never interpret failed tag lookup as untagged.
 
 
-def _add_ec2(ctx, region, out):
+def _add_ec2(ctx, region, out, errors):
     ec2 = ctx.client_cached('ec2', region)
     for reservation in paged(ec2, 'describe_instances', 'Reservations'):
         for i in reservation.get('Instances', []):
@@ -79,13 +81,13 @@ def _add_ec2(ctx, region, out):
                            vpc_id=subnet.get('VpcId'), cidr_block=subnet.get('CidrBlock')))
 
 
-def _add_rds(ctx, region, out):
+def _add_rds(ctx, region, out, errors):
     rds = ctx.client_cached('rds', region)
     for db in paged(rds, 'describe_db_instances', 'DBInstances'):
         arn = db.get('DBInstanceArn', '')
         tags = db.get('TagList')
         if tags is None and arn:
-            tags = _tagged(ctx, 'rds', region, arn)
+            tags = _tagged(ctx, 'rds', region, arn, errors)
         out.append(_record('rds', 'db-instance', region, db['DBInstanceIdentifier'],
                            arn=arn, tags=tags, encrypted=db.get('StorageEncrypted'),
                            publicly_accessible=db.get('PubliclyAccessible'),
@@ -101,7 +103,7 @@ def _add_rds(ctx, region, out):
                            deletion_protection=db.get('DeletionProtection'), engine=db.get('Engine')))
 
 
-def _add_elb(ctx, region, out):
+def _add_elb(ctx, region, out, errors):
     elb = ctx.client_cached('elbv2', region)
     lbs = paged(elb, 'describe_load_balancers', 'LoadBalancers')
     # ALB/NLB tags are not present in DescribeLoadBalancers.
@@ -114,8 +116,11 @@ def _add_elb(ctx, region, out):
             resp = api_call(elb, 'describe_tags', ResourceArns=[lb['LoadBalancerArn'] for lb in batch])
             for d in resp.get('TagDescriptions', []):
                 tag_map[d['ResourceArn']] = d.get('Tags', [])
-        except EvidenceUnavailable:
-            pass
+        except EvidenceUnavailable as exc:
+            for lb in batch:
+                errors.append({'region': region, 'service': 'elbv2',
+                               'operation': 'describe_tags', 'resource': lb['LoadBalancerArn'],
+                               'reason': str(exc)[:180]})
     for lb in lbs:
         arn = lb['LoadBalancerArn']
         out.append(_record('elbv2', lb.get('Type', 'load-balancer'), region,
@@ -125,14 +130,14 @@ def _add_elb(ctx, region, out):
                            vpc_id=lb.get('VpcId'), state=lb.get('State', {}).get('Code')))
 
 
-def _add_logs(ctx, region, out):
+def _add_logs(ctx, region, out, errors):
     for g in paged(ctx.client_cached('logs', region), 'describe_log_groups', 'logGroups'):
         out.append(_record('logs', 'log-group', region, g['logGroupName'],
                            arn=g.get('arn', ''), name=g['logGroupName'],
                            retention_days=g.get('retentionInDays')))
 
 
-def _add_s3(ctx, out):
+def _add_s3(ctx, out, errors):
     s3 = ctx.client_cached('s3')
     buckets = api_call(s3, 'list_buckets').get('Buckets', [])
     for bucket in buckets:
@@ -140,13 +145,16 @@ def _add_s3(ctx, out):
         tags = []
         try:
             tags = api_call(s3, 'get_bucket_tagging', Bucket=name).get('TagSet', [])
-        except EvidenceUnavailable:
-            pass
+        except EvidenceUnavailable as exc:
+            if 'NoSuchTagSet' not in str(exc):
+                errors.append({'region': 'global', 'service': 's3',
+                               'operation': 'get_bucket_tagging', 'resource': name,
+                               'reason': str(exc)[:180]})
         out.append(_record('s3', 'bucket', 'global', name, arn=f'arn:aws:s3:::{name}',
                            tags=tags, name=name))
 
 
-def _add_iam(ctx, out):
+def _add_iam(ctx, out, errors):
     iam = ctx.client_cached('iam')
     for user in paged(iam, 'list_users', 'Users'):
         out.append(_record('iam', 'user', 'global', user['UserName'],
@@ -158,7 +166,7 @@ def _add_iam(ctx, out):
                            path=role.get('Path', '')))
 
 
-def _add_cloudfront(ctx, out):
+def _add_cloudfront(ctx, out, errors):
     cf = ctx.client_cached('cloudfront', 'us-east-1')
     marker = None
     for _ in range(10000):
@@ -170,8 +178,10 @@ def _add_cloudfront(ctx, out):
             if arn:
                 try:
                     tags = api_call(cf, 'list_tags_for_resource', Resource=arn).get('Tags', {}).get('Items', [])
-                except EvidenceUnavailable:
-                    pass
+                except EvidenceUnavailable as exc:
+                    errors.append({'region': 'global', 'service': 'cloudfront',
+                                   'operation': 'list_tags_for_resource', 'resource': d['Id'],
+                                   'reason': str(exc)[:180]})
             out.append(_record('cloudfront', 'distribution', 'global', d['Id'],
                                arn=arn, tags=tags, name=d.get('Comment', '') or d['Id'],
                                domain_name=d.get('DomainName'), enabled=d.get('Enabled')))
@@ -255,14 +265,14 @@ def collect_resource_inventory(ctx, regions, product=None, product_tag=None):
         ):
             try:
                 ctx.guard_expiration()
-                collect(ctx, region, inventory)
+                collect(ctx, region, inventory, errors)
             except EvidenceUnavailable as exc:
                 errors.append({'region': region, 'service': label,
                                'reason': str(exc)[:180]})
     for label, collect in (('s3', _add_s3), ('iam', _add_iam), ('cloudfront', _add_cloudfront)):
         try:
             ctx.guard_expiration()
-            collect(ctx, inventory)
+            collect(ctx, inventory, errors)
         except EvidenceUnavailable as exc:
             errors.append({'region': 'global', 'service': label,
                            'reason': str(exc)[:180]})
@@ -276,6 +286,7 @@ def collect_resource_inventory(ctx, regions, product=None, product_tag=None):
                 'Not all AWS services and resource types are inventoried.',
                 'Resource identity tags are a restricted allowlist, not full tag payloads.',
                 'Related SG/EBS may be shared with other products.',
+                'collection_errors includes per-resource tag read failures; empty tags do not establish absence of a product.',
                 'Name-prefix attribution is heuristic; untagged/shared resources may be omitted.',
                 'Resource inventory is not a replacement for per-control security assessment.',
             ]}
