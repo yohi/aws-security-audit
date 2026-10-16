@@ -156,3 +156,33 @@ This runs the existing 46 checks and supplemental inspection for #5 (dangerous s
 
 This is **investigation only**: no AWS IAM, networking, EBS, EC2, logging, or Security Hub configuration changes; no automated remediation; no active probing. Any claim of effective IAM No-Write remains **NOT PROVEN**, regardless of session policy. The full operating contract and limitations are in [docs/INVESTIGATION_ONLY.md](docs/INVESTIGATION_ONLY.md).
 
+
+
+## Resource identity and product-scoped investigation (draft PR)
+
+`assess` also exports a **resource inventory** as JSON and CSV, and adds a fourth `リソース台帳` sheet to the original XLSX. The consolidated audit JSON and web review attachment include the inventory. Identity columns include service, type, region, `name` (AWS `Name` tag where available), resource ID, ARN, selected identity tags, attribution evidence, and service-specific non-secret attributes. Inventory covers EC2 instances, EBS volumes, security groups, VPCs, subnets, RDS instances/clusters, ELBv2, CloudWatch log groups, S3 buckets, IAM users/roles and CloudFront distributions. **It does not cover every AWS service or every associated resource.** Missing tags, unsupported ownership metadata, and collection errors remain explicit coverage gaps.
+
+Examples:
+
+```bash
+# Entire account: unchanged 46-control scanner plus new identity inventory
+uv run --locked --no-sync aws-security-audit assess \\
+  --source-profile default \\
+  --role-arn arn:aws:iam::123456789012:role/aws-security-audit-readonly \\
+  --regions all --llm export --out ./reports/account
+
+# One product (Name/ID prefix such as scs2-*, or Product/Project/Application/Service tag exact value)
+uv run --locked --no-sync aws-security-audit assess \\
+  --source-profile default \\
+  --role-arn arn:aws:iam::123456789012:role/aws-security-audit-readonly \\
+  --regions ap-northeast-1 --product scs2 --llm export --out ./reports/scs2
+
+# Prefer explicit tag ownership (supported identity tag keys only)
+uv run --locked --no-sync aws-security-audit assess \\
+  --source-profile default \\
+  --role-arn arn:aws:iam::123456789012:role/aws-security-audit-readonly \\
+  --regions ap-northeast-1 --product scs2 --product-tag Project=scs2 \\
+  --llm export --out ./reports/scs2-tagged
+```
+
+**Product scope is conservative, not a full 46-control certification.** It does not run the account-wide 46-control check suite and falsely relabel those results as product-specific. It emits 46 entries with `MANUAL_REVIEW`/`UNKNOWN` unless directly selected resources show a negative observation for #2 (RDS public), #5 (risky SG ingress), #19 (unencrypted EBS), #20 (unencrypted RDS) or #23 (RDS deletion protection). It deliberately does **not** claim PASS from absence of observed findings. SG/EBS inherited from EC2 attachment are marked RELATED and may be shared. Untagged/shared/unmatched resources can be omitted and must not be interpreted as absent. Tag API read failures are collection/attribution limitations, not proof of no resource. The original AWS audit remains investigation-only, uses existing AssumeRole security guard, and never makes AWS changes or automatic LLM uploads.
