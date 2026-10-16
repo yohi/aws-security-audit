@@ -13,7 +13,7 @@ from botocore.exceptions import BotoCoreError, ClientError, ProfileNotFound
 from . import __version__
 from .catalog import CHECKS
 from .checks import CHECK_RUNNERS, GLOBAL_CHECKS
-from .core import AuditContext, AuditError, EvidenceUnavailable, Finding, timestamp
+from .core import AuditContext, AuditError, EvidenceUnavailable, Finding, api_call, timestamp
 from .report import export_report, overall_rows
 
 CONFIG = Path.home() / '.config' / 'aws-security-audit' / 'config.json'
@@ -27,8 +27,8 @@ def parser() -> argparse.ArgumentParser:
     setup.add_argument('--role-arn')
     setup.add_argument('--regions')
     setup.add_argument('--force', action='store_true', help='Overwrite existing local configuration')
-    for name in ('doctor', 'scan'):
-        cmd = sub.add_parser(name, help='Verify STS identity' if name == 'doctor' else 'Run all 46 checks')
+    for name in ('doctor', 'scan', 'policy-evidence'):
+        cmd = sub.add_parser(name, help={'doctor': 'Verify identity, region and sampled AWS reads', 'scan':'Run all 46 checks', 'policy-evidence':'Fingerprint actual AWS IAM managed policy'}[name])
         cmd.add_argument('--source-profile', help='Profile authenticated by aws login / aws sso login')
         cmd.add_argument('--role-arn', help='Existing IAM role to assume with managed ReadOnlyAccess session policy')
         cmd.add_argument('--regions', help='Comma-separated regions, or all (default all)')
@@ -98,14 +98,69 @@ def prepare(args: argparse.Namespace) -> tuple[AuditContext, list[str]]:
     if not cfg['role_arn'].startswith('arn:aws:'):
         raise AuditError('This release only supports the commercial AWS partition (arn:aws)')
     ctx = AuditContext(cfg['source_profile'], cfg['role_arn'], bootstrap_region)
+    available_regions = ctx.active_regions()
     if regions_spec == 'all':
-        regions = ctx.active_regions()
+        regions = available_regions
     else:
         if len(parts) != len(set(parts)) or any(not r.startswith(('ap-', 'us-', 'eu-', 'sa-', 'ca-', 'af-', 'me-', 'il-', 'mx-')) for r in parts):
             raise AuditError('Invalid/duplicate region names')
+        if set(parts) - set(available_regions):
+            raise AuditError('Requested AWS region invalid, disabled or not verifiable; audit aborted')
         regions = parts
     return ctx, regions
 
+
+
+def doctor(ctx: AuditContext, regions: list[str]) -> int:
+    """Verify sampled reads with scoped STS credentials, not universal No-Write."""
+    print(f'IDENTITY_VERIFIED account={ctx.account} role={ctx.expected_role_arn}', flush=True)
+    print(f'REGION_VERIFIED count={len(regions)}', flush=True)
+    probes = [('iam', regions[0], 'list_account_aliases'),
+              ('s3', regions[0], 'list_buckets')]
+    for region in regions:
+        probes += [('ec2', region, 'describe_vpcs'),
+                   ('cloudtrail', region, 'describe_trails'),
+                   ('rds', region, 'describe_db_instances')]
+    for service, region, action in probes:
+        try:
+            ctx.guard_expiration()
+            api_call(ctx.client_cached(service, region), action)
+        except (AuditError, BotoCoreError, ClientError) as exc:
+            print(f'READ_API_UNVERIFIED service={service} action={action} '
+                  f'region={region} error_type={type(exc).__name__}', flush=True)
+            print('EFFECTIVE_NO_WRITE=NOT_PROVEN', flush=True)
+            return 2
+    print(f'READ_API_VERIFIED sample={len(probes)} scope=selected-probes-only', flush=True)
+    print('FULL_46_CHECK_PERMISSIONS=NOT_VERIFIED', flush=True)
+    print('EFFECTIVE_NO_WRITE=NOT_PROVEN', flush=True)
+    return 0
+
+
+def policy_evidence(ctx: AuditContext) -> int:
+    """Fingerprint current AWS-managed ReadOnlyAccess document (read-only APIs)."""
+    import hashlib
+    from urllib.parse import unquote
+    arn = 'arn:aws:iam::aws:policy/ReadOnlyAccess'
+    iam = ctx.client_cached('iam', ctx.region)
+    policy = api_call(iam, 'get_policy', PolicyArn=arn)['Policy']
+    version = policy['DefaultVersionId']
+    document = api_call(iam, 'get_policy_version', PolicyArn=arn,
+                        VersionId=version)['PolicyVersion']['Document']
+    if isinstance(document, str):
+        document = json.loads(unquote(document))
+    if not isinstance(document, dict):
+        raise EvidenceUnavailable('ReadOnlyAccess policy document unavailable')
+    canonical = json.dumps(document, sort_keys=True, ensure_ascii=False,
+                           separators=(',', ':')).encode('utf-8')
+    print(json.dumps({
+        'policy_arn': arn,
+        'policy_version': version,
+        'policy_sha256_canonical_json': hashlib.sha256(canonical).hexdigest(),
+        'observed_at_utc': timestamp(),
+        'effective_no_write': 'NOT_PROVEN',
+        'note': 'Fingerprint only; no-write not proven, preserve original document separately'
+    }, ensure_ascii=False, sort_keys=True), flush=True)
+    return 0
 
 def run_scan(ctx: AuditContext, regions: list[str], options: dict) -> list[Finding]:
     records: list[Finding] = []
@@ -143,8 +198,9 @@ def main(argv: list[str] | None = None) -> int:
         print(f'Assumed role (STS): {ctx.identity_arn} | source: {ctx.source_profile}', flush=True)
         print('STS session policy: ReadOnlyAccess (intersection with IAM role permissions)', flush=True)
         if args.command == 'doctor':
-            print(f'OK; account={ctx.account}, regions={len(regions)}', flush=True)
-            return 0
+            return doctor(ctx, regions)
+        if args.command == 'policy-evidence':
+            return policy_evidence(ctx)
         options = {'regions': regions, 'all_account_regions': ctx.active_regions(), 'ap_tag': args.ap_tag}
         records = run_scan(ctx, regions, options)
         full_coverage = set(regions) == set(options['all_account_regions'])
