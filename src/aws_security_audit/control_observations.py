@@ -134,6 +134,33 @@ def build_product_observations(inventory: dict, regions: list[str]) -> dict:
                     logs['access_logs.s3.enabled'],
                     'ALB setting only; application logs and delivery not verified')
 
+        if kind == 'distribution':
+            # A CloudFront distribution can front several products, while some
+            # requests may bypass it and go straight to a publicly exposed ALB.
+            # A WAF ARN proves only configured association, not rules/actions
+            # and never proves this product has end-to-end WAF protection.
+            acl = attrs.get('web_acl_id')
+            acl_state = CONTEXT_ONLY if isinstance(acl, str) else PROPERTY_UNKNOWN
+            add(6, r, acl_state, 'CloudFront configured Web ACL association',
+                {'web_acl_id': acl, 'origins': attrs.get('origin_domains', []),
+                 'enabled': attrs.get('enabled'),
+                 'source': attrs.get('web_acl_metadata_source')},
+                'CloudFront WAF configuration only; rule effectiveness, ALB bypass and '
+                'product route coverage not verified')
+            geo = attrs.get('geo_restriction_type')
+            add(7, r, CONTEXT_ONLY if isinstance(geo, str) else PROPERTY_UNKNOWN,
+                'CloudFront GeoRestriction configuration',
+                {'restriction_type': geo,
+                 'location_count': attrs.get('geo_restriction_location_count')},
+                'Geo restriction is policy-dependent; WAF geographic match rules and '
+                'business requirements not inspected')
+            policy = attrs.get('viewer_minimum_protocol_version')
+            add(16, r, CONTEXT_ONLY if isinstance(policy, str) else PROPERTY_UNKNOWN,
+                'CloudFront viewer minimum protocol policy',
+                {'minimum_protocol_version': policy, 'enabled': attrs.get('enabled')},
+                'Security policy label is not a verified protocol-list for every TLS '
+                'connection and does not supersede the ALB #16 negative finding')
+
         if kind == 'bucket':
             algorithms = attrs.get('default_encryption_algorithms')
             known = {'AES256', 'aws:kms', 'aws:kms:dsse'}

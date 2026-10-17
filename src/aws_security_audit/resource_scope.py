@@ -363,6 +363,37 @@ def _add_iam(ctx, out, errors):
                            path=role.get('Path', '')))
 
 
+def _dns_hostname(value):
+    """Compare exact DNS hostnames only, not aliases, prefixes, URLs or suffixes."""
+    if not isinstance(value, str):
+        return None
+    hostname = value.rstrip('.').casefold()
+    if (len(hostname) > 253 or len(hostname) < 4 or '..' in hostname or
+            not re.fullmatch(r'[a-z0-9-]+(?:\.[a-z0-9-]+)+', hostname)):
+        return None
+    return hostname
+
+
+def _cloudfront_summary_attributes(distribution):
+    """Allowlist documented distribution summary fields; never save custom headers."""
+    origin_domains = sorted({
+        domain for item in distribution.get('Origins', {}).get('Items', [])
+        if (domain := _dns_hostname(item.get('DomainName'))) is not None
+    })
+    geo = distribution.get('Restrictions', {}).get('GeoRestriction', {})
+    viewer = distribution.get('ViewerCertificate', {})
+    acl = distribution.get('WebACLId')
+    return {
+        'origin_domains': origin_domains,
+        'web_acl_id': acl if isinstance(acl, str) else None,
+        'geo_restriction_type': geo.get('RestrictionType'),
+        'geo_restriction_location_count': geo.get('Quantity'),
+        'viewer_minimum_protocol_version': viewer.get('MinimumProtocolVersion'),
+        'distribution_status': distribution.get('Status'),
+        'web_acl_metadata_source': 'cloudfront.list_distributions',
+    }
+
+
 def _add_cloudfront(ctx, out, errors):
     cf = ctx.client_cached('cloudfront', 'us-east-1')
     marker = None
@@ -381,7 +412,8 @@ def _add_cloudfront(ctx, out, errors):
                                    'reason': str(exc)[:180]})
             out.append(_record('cloudfront', 'distribution', 'global', d['Id'],
                                arn=arn, tags=tags, name=d.get('Comment', '') or d['Id'],
-                               domain_name=d.get('DomainName'), enabled=d.get('Enabled')))
+                               domain_name=d.get('DomainName'), enabled=d.get('Enabled'),
+                               **_cloudfront_summary_attributes(d)))
         if not data.get('IsTruncated'):
             return
         next_marker = data.get('NextMarker')
@@ -431,13 +463,23 @@ def attribute_resources(resources, product=None, product_tag=None):
                       if r['attributes'].get('vpc_id')}
     referenced_subnet = {(r['region'], r['attributes']['subnet_id']) for r in direct
                          if r['attributes'].get('subnet_id')}
+    direct_alb_dns = {
+        host for r in direct
+        if r['service'] == 'elbv2' and r['resource_type'] == 'application'
+        if (host := _dns_hostname(r['attributes'].get('dns_name'))) is not None
+    }
     for resource in resources:
         if resource['attribution'] == 'DIRECT':
             continue
         attrs = resource['attributes']
         region, kind, rid = resource['region'], resource['resource_type'], resource['resource_id']
         reason = None
-        if kind == 'ebs-volume' and any(
+        if resource['service'] == 'cloudfront' and kind == 'distribution' and (
+                direct_alb_dns & set(attrs.get('origin_domains') or [])):
+            # An exact configured origin equals the ALB's AWS DNS hostname.
+            # The distribution can serve other products and be bypassed.
+            reason = 'Configured origin DNS exactly references a DIRECT ALB; distribution may be shared'
+        elif kind == 'ebs-volume' and any(
             (region, 'instance', x) in keys for x in attrs.get('attached_instance_ids', [])):
             reason = 'Attached to directly matched EC2 instance; may be shared'
         elif kind == 'ebs-snapshot' and attrs.get('source_volume_id') and (
@@ -484,8 +526,26 @@ def attribute_resources(resources, product=None, product_tag=None):
                 f'Snapshot references {source_kind} with DIRECT/RELATED attribution; ownership not proven'
             )
     selected = [r for r in resources if r['attribution'] != 'UNCLASSIFIED']
+    distributions = [r for r in resources
+                     if r['service'] == 'cloudfront' and r['resource_type'] == 'distribution']
+    cf_linkage = {
+        'distribution_listing_state': 'COLLECTED_WITHOUT_LIST_ERROR',
+        'distributions_observed': len(distributions),
+        'directly_attributed': sum(r['attribution'] == 'DIRECT' for r in distributions),
+        'linked_to_direct_alb_by_exact_origin': sum(
+            r['attribution'] == 'RELATED'
+            and r.get('attribution_evidence', '').startswith('Configured origin DNS exactly references')
+            for r in distributions),
+        'unassigned': sum(r['attribution'] == 'UNCLASSIFIED' for r in distributions),
+        'direct_albs_with_dns_name': len(direct_alb_dns),
+        'matching_rule': 'normalized exact CloudFront origin domain == DIRECT ALB DNSName',
+        'limit': ('Zero linked distributions does not prove CloudFront is absent, '
+                  'or that CloudFront cannot route to ROS via a custom origin hostname. '
+                  'This counter never certifies WAF effectiveness or product ownership.'),
+    }
     return selected, {
         'mode': 'product', 'product': product, 'product_tag': product_tag,
+        'cloudfront_origin_linkage': cf_linkage,
         'matched': len(selected),
         'direct': sum(x['attribution'] == 'DIRECT' for x in selected),
         'related': sum(x['attribution'] == 'RELATED' for x in selected),
@@ -513,9 +573,25 @@ def collect_resource_inventory(ctx, regions, product=None, product_tag=None):
             ctx.guard_expiration()
             collect(ctx, inventory, errors)
         except EvidenceUnavailable as exc:
-            errors.append({'region': 'global', 'service': label,
-                           'reason': str(exc)[:180]})
+            error = {'region': 'global', 'service': label,
+                     'reason': str(exc)[:180]}
+            if label == 'cloudfront':
+                error['operation'] = 'list_distributions'
+            errors.append(error)
     selected, scope = attribute_resources(inventory, product, product_tag)
+    if product is not None:
+        cf_list_errors = [
+            err for err in errors
+            if err.get('service') == 'cloudfront'
+            and err.get('operation') == 'list_distributions'
+        ]
+        if cf_list_errors:
+            scope['cloudfront_origin_linkage']['distribution_listing_state'] = 'UNVERIFIED_LIST_ERROR'
+        scope['cloudfront_origin_linkage']['cloudfront_tag_read_errors'] = sum(
+            err.get('service') == 'cloudfront'
+            and err.get('operation') == 'list_tags_for_resource'
+            for err in errors
+        )
     shared = None
     if product is not None:
         from .shared_security_evidence import collect_shared_security_evidence
@@ -542,9 +618,13 @@ PRODUCT_OBSERVATION_FIELDS = {
     1: {'instance': ('state', 'public_ipv4', 'subnet_id', 'vpc_id')},
     2: {'db-instance': ('publicly_accessible', 'cluster_id', 'engine')},
     5: {'security-group': ('dangerous_ingress', 'vpc_id', 'ingress_rules', 'egress_rules')},
-    6: {'application': ('scheme', 'waf_web_acl_arn', 'waf_web_acl_lookup')},
+    6: {'application': ('scheme', 'waf_web_acl_arn', 'waf_web_acl_lookup'),
+        'distribution': ('origin_domains', 'web_acl_id', 'enabled',
+                         'distribution_status', 'web_acl_metadata_source')},
+    7: {'distribution': ('geo_restriction_type', 'geo_restriction_location_count')},
     14: {'instance': ('state', 'subnet_id')},
-    16: {'application': ('listeners', 'scheme')},
+    16: {'application': ('listeners', 'scheme'),
+         'distribution': ('viewer_minimum_protocol_version', 'enabled')},
     17: {'bucket': ('default_encryption_algorithms',)},
     18: {'bucket': ('bucket_public_access_block',)},
     19: {'ebs-volume': ('encrypted', 'size_gib', 'attached_instance_ids'),
