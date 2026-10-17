@@ -38,7 +38,7 @@ def _web_acl():
                 'ManagedRuleGroupStatement': {
                     'VendorName': 'AWS', 'Name': 'AWSManagedRulesCommonRuleSet',
                     'ScopeDownStatement': {'ByteMatchStatement': {
-                        'SearchString': b'SENSITIVE-PAYLOAD'}}},
+                        'SearchString': b'SENSITIVE-PAYLOAD'}}}},
              'OverrideAction': {'None': {}}},
             {'Name': 'sql-injection-path', 'Statement': {
                 'SqliMatchStatement': {'FieldToMatch': {'UriPath': {}},
