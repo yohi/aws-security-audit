@@ -526,8 +526,26 @@ def attribute_resources(resources, product=None, product_tag=None):
                 f'Snapshot references {source_kind} with DIRECT/RELATED attribution; ownership not proven'
             )
     selected = [r for r in resources if r['attribution'] != 'UNCLASSIFIED']
+    distributions = [r for r in resources
+                     if r['service'] == 'cloudfront' and r['resource_type'] == 'distribution']
+    cf_linkage = {
+        'distribution_listing_state': 'COLLECTED_WITHOUT_LIST_ERROR',
+        'distributions_observed': len(distributions),
+        'directly_attributed': sum(r['attribution'] == 'DIRECT' for r in distributions),
+        'linked_to_direct_alb_by_exact_origin': sum(
+            r['attribution'] == 'RELATED'
+            and r.get('attribution_evidence', '').startswith('Configured origin DNS exactly references')
+            for r in distributions),
+        'unassigned': sum(r['attribution'] == 'UNCLASSIFIED' for r in distributions),
+        'direct_albs_with_dns_name': len(direct_alb_dns),
+        'matching_rule': 'normalized exact CloudFront origin domain == DIRECT ALB DNSName',
+        'limit': ('Zero linked distributions does not prove CloudFront is absent, '
+                  'or that CloudFront cannot route to ROS via a custom origin hostname. '
+                  'This counter never certifies WAF effectiveness or product ownership.'),
+    }
     return selected, {
         'mode': 'product', 'product': product, 'product_tag': product_tag,
+        'cloudfront_origin_linkage': cf_linkage,
         'matched': len(selected),
         'direct': sum(x['attribution'] == 'DIRECT' for x in selected),
         'related': sum(x['attribution'] == 'RELATED' for x in selected),
@@ -558,6 +576,19 @@ def collect_resource_inventory(ctx, regions, product=None, product_tag=None):
             errors.append({'region': 'global', 'service': label,
                            'reason': str(exc)[:180]})
     selected, scope = attribute_resources(inventory, product, product_tag)
+    if product is not None:
+        cf_list_errors = [
+            err for err in errors
+            if err.get('service') == 'cloudfront'
+            and err.get('operation') == 'list_distributions'
+        ]
+        if cf_list_errors:
+            scope['cloudfront_origin_linkage']['distribution_listing_state'] = 'UNVERIFIED_LIST_ERROR'
+        scope['cloudfront_origin_linkage']['cloudfront_tag_read_errors'] = sum(
+            err.get('service') == 'cloudfront'
+            and err.get('operation') == 'list_tags_for_resource'
+            for err in errors
+        )
     shared = None
     if product is not None:
         from .shared_security_evidence import collect_shared_security_evidence
