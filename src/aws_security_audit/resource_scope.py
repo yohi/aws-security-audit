@@ -284,12 +284,11 @@ def _add_elb(ctx, region, out, errors):
                 response = api_call(ctx.client_cached('wafv2', region),
                                     'get_web_acl_for_resource', ResourceArn=arn)
                 acl = response.get('WebACL')
-                if 'WebACL' not in response:
-                    observed['waf_web_acl_lookup'] = 'UNVERIFIED_SCHEMA'
-                    errors.append({'region': region, 'service': 'wafv2',
-                                   'operation': 'get_web_acl_for_resource',
-                                   'resource': arn, 'reason': 'WebACL field absent in response'})
-                elif acl is None:
+                if acl is None:
+                    # AWS returns WebACL:null when no ACL is associated.
+                    # Botocore deserializes both null and an absent null member
+                    # to a dict without WebACL. A *successful* API response
+                    # with no WebACL object is therefore NOT_ASSOCIATED.
                     observed['waf_web_acl_arn'] = None
                     observed['waf_web_acl_lookup'] = 'NOT_ASSOCIATED'
                 elif isinstance(acl, dict) and isinstance(acl.get('ARN'), str):
@@ -303,11 +302,12 @@ def _add_elb(ctx, region, out, errors):
                                    'resource': arn, 'reason': 'WebACL response lacks a valid ARN'})
             except EvidenceUnavailable as exc:
                 # A missing WebACL is distinct from no permission to inspect it.
-                observed['waf_web_acl_lookup'] = 'NOT_ASSOCIATED' if 'WAFNonexistentItemException' in str(exc) else 'UNVERIFIED'
-                if observed['waf_web_acl_lookup'] == 'UNVERIFIED':
-                    errors.append({'region': region, 'service': 'wafv2',
-                                   'operation': 'get_web_acl_for_resource',
-                                   'resource': arn, 'reason': str(exc)[:180]})
+                # A missing/nonexistent target is an API failure, never proof
+                # that a valid load balancer has no associated WebACL.
+                observed['waf_web_acl_lookup'] = 'UNVERIFIED'
+                errors.append({'region': region, 'service': 'wafv2',
+                               'operation': 'get_web_acl_for_resource',
+                               'resource': arn, 'reason': str(exc)[:180]})
         out.append(_record('elbv2', lb.get('Type', 'load-balancer'), region,
                            lb.get('LoadBalancerName', arn), arn=arn,
                            tags=tag_map.get(arn), name=lb.get('LoadBalancerName', ''),
