@@ -66,7 +66,9 @@ def test_origin_match_is_casefold_exact_not_subdomain_prefix_or_url():
 
 def test_direct_cloudfront_remains_direct_and_other_project_alb_not_inferred():
     selected, scope = attribute_resources([
-        alb('other-product-alb', 'other.elb.amazonaws.com'),
+        _record('elbv2', 'application', REGION, 'other-product-alb',
+                tags=[{'Key': 'Product', 'Value': 'other'}],
+                dns_name='other.elb.amazonaws.com'),
         cloudfront(tags=[{'Key': 'Product', 'Value': 'ros'}],
                    origins=['other.elb.amazonaws.com']),
     ], 'ros')
