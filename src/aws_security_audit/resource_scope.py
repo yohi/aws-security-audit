@@ -573,8 +573,11 @@ def collect_resource_inventory(ctx, regions, product=None, product_tag=None):
             ctx.guard_expiration()
             collect(ctx, inventory, errors)
         except EvidenceUnavailable as exc:
-            errors.append({'region': 'global', 'service': label,
-                           'reason': str(exc)[:180]})
+            error = {'region': 'global', 'service': label,
+                     'reason': str(exc)[:180]}
+            if label == 'cloudfront':
+                error['operation'] = 'list_distributions'
+            errors.append(error)
     selected, scope = attribute_resources(inventory, product, product_tag)
     if product is not None:
         cf_list_errors = [
