@@ -107,6 +107,16 @@ def build_product_observations(inventory: dict, regions: list[str]) -> dict:
             web_acl = attrs.get('waf_web_acl_arn')
             add(6, r, CONTEXT_ONLY, 'direct_alb_waf_web_acl_arn', web_acl,
                 'Direct ALB WAF association only; an upstream CloudFront WAF may exist')
+            rule = attrs.get('waf_rule_summary')
+            lookup = attrs.get('waf_web_acl_lookup')
+            if isinstance(rule, dict) or lookup is not None:
+                state = (CONTEXT_ONLY if isinstance(rule, dict) and
+                         rule.get('state') == 'VERIFIED_SUMMARY' else
+                         CONTEXT_ONLY if lookup == 'NOT_ASSOCIATED' else PROPERTY_UNKNOWN)
+                add(6, r, state, 'ALB WAF rule configuration summary',
+                    {'lookup': lookup, 'rules': rule},
+                    'Rule type/action counts are WAF configuration only; no end-to-end '
+                    'effective filtering or upstream WAF assurance')
             for listener in attrs.get('listeners', []):
                 if listener.get('protocol') not in ('HTTPS', 'TLS'):
                     continue
@@ -147,6 +157,16 @@ def build_product_observations(inventory: dict, regions: list[str]) -> dict:
                  'source': attrs.get('web_acl_metadata_source')},
                 'CloudFront WAF configuration only; rule effectiveness, ALB bypass and '
                 'product route coverage not verified')
+            summary = attrs.get('waf_rule_summary')
+            lookup = attrs.get('waf_rule_lookup')
+            if isinstance(summary, dict) or lookup is not None:
+                state = (CONTEXT_ONLY if isinstance(summary, dict) and
+                         summary.get('state') == 'VERIFIED_SUMMARY' else
+                         CONTEXT_ONLY if lookup == 'NOT_ASSOCIATED' else PROPERTY_UNKNOWN)
+                add(6, r, state, 'CloudFront WAF rule configuration summary',
+                    {'lookup': lookup, 'rules': summary},
+                    'Only selected CloudFront WebACLs inspected. Outer rule types/actions '
+                    'do not prove complete ROS protection, traffic path or attack blocking')
             geo = attrs.get('geo_restriction_type')
             add(7, r, CONTEXT_ONLY if isinstance(geo, str) else PROPERTY_UNKNOWN,
                 'CloudFront GeoRestriction configuration',
