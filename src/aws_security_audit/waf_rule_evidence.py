@@ -10,6 +10,7 @@ from collections import Counter
 
 ALLOWED_ACTIONS = frozenset({'Allow', 'Block', 'Count', 'Captcha', 'Challenge'})
 ALLOWED_OVERRIDES = frozenset({'Count', 'None'})
+GROUP_STATEMENTS = frozenset({'ManagedRuleGroupStatement', 'RuleGroupReferenceStatement'})
 ALLOWED_STATEMENTS = frozenset({
     'ManagedRuleGroupStatement', 'RuleGroupReferenceStatement',
     'RateBasedStatement', 'GeoMatchStatement', 'IPSetReferenceStatement',
@@ -23,8 +24,12 @@ ALLOWED_STATEMENTS = frozenset({
 def _single_allowed_key(value, allowed):
     if not isinstance(value, dict):
         return None
-    keys = [key for key in value if key in allowed]
-    return keys[0] if len(keys) == 1 else None
+    # A union with additional/unknown keys cannot be treated as a single
+    # verified alternative; fail closed against future SDK schema changes.
+    if len(value) != 1:
+        return None
+    key = next(iter(value))
+    return key if key in allowed else None
 
 
 def web_acl_rule_summary(acl):
@@ -48,10 +53,16 @@ def web_acl_rule_summary(acl):
         statement = _single_allowed_key(rule.get('Statement'), ALLOWED_STATEMENTS)
         action = _single_allowed_key(rule.get('Action'), ALLOWED_ACTIONS)
         override = _single_allowed_key(rule.get('OverrideAction'), ALLOWED_OVERRIDES)
-        if statement is None:
+        # WAFv2 Rule contract uses OverrideAction for referenced rule
+        # groups, Action for a standalone statement. A missing, invalid, or
+        # contradictory action must never produce VERIFIED_SUMMARY.
+        expected_override = statement in GROUP_STATEMENTS
+        valid_action = (override is not None and action is None) if expected_override else (
+            action is not None and override is None)
+        if statement is None or not valid_action:
             incomplete += 1
-        else:
-            statements[statement] += 1
+            continue
+        statements[statement] += 1
         if action is not None:
             actions[action] += 1
         if override is not None:
