@@ -30,6 +30,17 @@ The product attribution algorithm may label an otherwise unselected CloudFront d
 - All original product verdicts are retained: `PASS=0` is expected even with better evidence, unless a separate deterministic negative finding has been proven by existing rules.
 - JSON / Web / CSV / XLSX outputs reuse the current 46-control and resource-property evidence contract. Because CloudFront can now enter the related resource inventory, selected resource counts may change; this is not a change to product attribution completeness.
 
+## R7 limited runtime result and evidence-diagnostic follow-up
+
+The ROS R7 run (2026-10-17T20:59:50 UTC, fixed initial PR #10 HEAD `277025f5e7161d3df8503d7097872a3456d9cd37` **not evidenced by a runtime SHA in the artifact**) selected 48 resources (DIRECT=43, RELATED=5) and **zero CloudFront distributions**. It preserved 18/46 controls with property/shared observations, 65 observation rows and three product FAIL (#16/#19/#22); the only collected error was Security Hub `InvalidAccessException`. This does **not** show that no CloudFront distributions exist, or that there is no WAF upstream. Four aged RDS snapshots rotated out and four newer snapshots rotated in between R6 and R7.
+
+To make a zero-link result auditable, the candidate now includes `resource_inventory.scope.cloudfront_origin_linkage`, with:
+- `distributions_observed`: global CloudFront distributions returned by the list response, including those not selected into the product inventory;
+- `direct_albs_with_dns_name`, `linked_to_direct_alb_by_exact_origin`, `directly_attributed`, `unassigned`;
+- `distribution_listing_state` distinguishing a successful bounded list from an API/list/pagination error, and `cloudfront_tag_read_errors`.
+
+This metadata contains **counts and constrained descriptions only**, not raw names/origin header values from unassigned resources. The ROS R7 packet **predates the diagnostic implementation**, so these counts are currently `NOT_OBSERVED`. A follow-up fixed-HEAD read-only R8 run is needed if the acceptance gate requires proving the zero-match reason in ROS. The change does not add new AWS API calls, does not infer WAF protection, and does not change 46 control verdicts.
+
 ## Tests and gates
 
 Offline regression cases include tagged/untagged distributions, linked/unlinked origins, exactness and malicious hostname confusables, pagination, sensitive custom headers exclusion, empty/unknown Web ACL semantics, and preservation of #6/#7/#16 as MANUAL_REVIEW.
