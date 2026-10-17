@@ -516,11 +516,15 @@ def collect_resource_inventory(ctx, regions, product=None, product_tag=None):
             errors.append({'region': 'global', 'service': label,
                            'reason': str(exc)[:180]})
     selected, scope = attribute_resources(inventory, product, product_tag)
+    shared = None
+    if product is not None:
+        from .shared_security_evidence import collect_shared_security_evidence
+        shared = collect_shared_security_evidence(ctx, regions, errors)
     scope['service_counts'] = dict(Counter(r['service'] for r in selected))
     scope['collection_errors'] = len(errors)
-    return {'schema': 'aws-security-resource-inventory-v1',
-            'scope': scope, 'regions_requested': list(regions),
-            'resources': selected, 'collection_errors': errors,
+    report = {'schema': 'aws-security-resource-inventory-v1',
+              'scope': scope, 'regions_requested': list(regions),
+              'resources': selected, 'collection_errors': errors,
             'limitations': [
                 'Not all AWS services and resource types are inventoried.',
                 'Resource identity tags are a restricted allowlist, not full tag payloads.',
@@ -529,6 +533,9 @@ def collect_resource_inventory(ctx, regions, product=None, product_tag=None):
                 'Name-prefix attribution is heuristic; untagged/shared resources may be omitted.',
                 'Resource inventory is not a replacement for per-control security assessment.',
             ]}
+    if shared is not None:
+        report['shared_control_evidence'] = shared
+    return report
 
 
 PRODUCT_OBSERVATION_FIELDS = {
@@ -591,10 +598,12 @@ def product_deep_evidence(inventory, regions):
                 'state': 'PARTIAL_OBSERVED',
                 'groups': [{'id': r['resource_id'], 'name': r['name'],
                             'attribution': r['attribution'],
-                            'dangerous_ingress_permissions': r['attributes'].get('dangerous_ingress')}
+                            'dangerous_ingress_permissions': r['attributes'].get('dangerous_ingress'),
+                            'ingress_rules': r['attributes'].get('ingress_rules'),
+                            'egress_rules': r['attributes'].get('egress_rules')}
                            for r in sgs],
                 'limitations': [
-                    'No ingress/egress rule-by-rule payload, ENI reachability, or actual internet probing.',
+                    'Ingress/egress rules captured as configured, but necessity, ENI/route reachability and effective path are not verified.',
                     'Unattributed groups may be absent and RELATED groups may be shared.',
                 ],
             },

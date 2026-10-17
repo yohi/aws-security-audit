@@ -45,6 +45,17 @@ def build_product_observations(inventory: dict, regions: list[str]) -> dict:
         attrs = r['attributes']
         direct = r['attribution'] == 'DIRECT'
 
+        if kind == 'instance':
+            add(1, r, CONTEXT_ONLY, 'EC2 public address and subnet',
+                {'public_ipv4': attrs.get('public_ipv4'),
+                 'subnet_id': attrs.get('subnet_id'), 'state': attrs.get('state')},
+                'EC2 role as AP/server/bastion is unverified; cannot score AP private placement')
+            add(14, r, CONTEXT_ONLY, 'EC2 connectivity observation',
+                {'state': attrs.get('state'),
+                 'subnet_id': attrs.get('subnet_id'),
+                 'security_group_ids': attrs.get('security_group_ids')},
+                'SSM registration, network path, SSH necessity and actual access are not inspected')
+
         if kind == 'db-instance':
             value = attrs.get('publicly_accessible')
             if isinstance(value, bool):
@@ -65,6 +76,27 @@ def build_product_observations(inventory: dict, regions: list[str]) -> dict:
                     'DB cluster deletion protection; member availability is separate')
 
         if kind == 'security-group':
+            public_ports = [
+                {'protocol': rule.get('protocol'),
+                 'from_port': rule.get('from_port'),
+                 'to_port': rule.get('to_port'),
+                 'ipv4_cidrs': [c for c in rule.get('ipv4_cidrs', []) if c == '0.0.0.0/0'],
+                 'ipv6_cidrs': [c for c in rule.get('ipv6_cidrs', []) if c == '::/0']}
+                for rule in attrs.get('ingress_rules', [])
+                if '0.0.0.0/0' in rule.get('ipv4_cidrs', [])
+                or '::/0' in rule.get('ipv6_cidrs', [])
+            ]
+            open_egress = [
+                rule for rule in attrs.get('egress_rules', [])
+                if (rule.get('protocol') == '-1'
+                    and ('0.0.0.0/0' in rule.get('ipv4_cidrs', [])
+                         or '::/0' in rule.get('ipv6_cidrs', [])))
+            ]
+            if 'ingress_rules' in attrs and 'egress_rules' in attrs:
+                add(5, r, CONTEXT_ONLY, 'public ingress and all-protocol public egress',
+                    {'public_ingress': public_ports, 'all_protocol_public_egress_rule_count': len(open_egress)},
+                    'Any public ingress is reviewable, including TCP/8000; ALB 80/443 may be intentional. '
+                    'No reachability, business necessity or automatic security FAIL inferred')
             count = attrs.get('dangerous_ingress')
             if type(count) is int:
                 add(5, r, PROPERTY_FAIL if count > 0 else CONTEXT_ONLY,
@@ -152,10 +184,87 @@ def build_product_observations(inventory: dict, regions: list[str]) -> dict:
                 add(27, r, CONTEXT_ONLY, 'Flow Logs at resource scope', logs,
                     'VPC/subnet configuration only; ENI or upstream/shared logging may exist')
 
+
+    # Region/account-level security services cannot be assigned to a product from
+    # tag/name matches. Preserve them as SHARED_UNATTRIBUTED context separately.
+    shared = inventory.get('shared_control_evidence') or {}
+    for block in shared.get('regions', []):
+        region = block['region']
+        for service, numbers in (
+            ('cloudtrail', (24, 25)),
+            ('guardduty', (32,)),
+            ('securityhub', (33,)),
+        ):
+            source = block.get(service) or {}
+            state = source.get('state', 'UNVERIFIED')
+            context = {
+                'region': region,
+                'service': service,
+                'resource_type': 'shared-security-control',
+                'name': service + ':' + region,
+                'resource_id': service + ':' + region,
+                'arn': '',
+                'attribution': 'SHARED_UNATTRIBUTED',
+                'attribution_evidence': 'Region-level account service; product ownership not established',
+            }
+            if service == 'cloudtrail':
+                trails = source.get('trails', [])
+                for number in numbers:
+                    if trails:
+                        for trail in trails:
+                            item = dict(context, name=trail.get('name') or context['name'],
+                                        resource_id=trail.get('trail_arn') or context['resource_id'],
+                                        arn=trail.get('trail_arn') or '')
+                            if number == 24:
+                                value = {
+                                    'multi_region': trail.get('multi_region'),
+                                    'organization': trail.get('organization'),
+                                    'log_status': trail.get('log_status'),
+                                    'is_logging': trail.get('is_logging'),
+                                    'has_s3_delivery_error': trail.get('has_s3_delivery_error'),
+                                    'selector_status': trail.get('selector_status'),
+                                    'selectors': trail.get('selectors'),
+                                }
+                            else:
+                                value = {
+                                    'log_file_validation_enabled': trail.get('log_file_validation_enabled'),
+                                    'has_digest_delivery_error': trail.get('has_digest_delivery_error'),
+                                    'log_status': trail.get('log_status'),
+                                }
+                            status = CONTEXT_ONLY if state == 'LIST_VERIFIED' else PROPERTY_UNKNOWN
+                            add(number, item, status, 'Regional CloudTrail trail configuration',
+                                value, 'Shared trail; delivery/selector/region coverage and product protection not certified')
+                    else:
+                        add(number, context, CONTEXT_ONLY if state == 'LIST_VERIFIED'
+                            else PROPERTY_UNKNOWN, 'Regional CloudTrail trail listing',
+                            {'state': state, 'trail_count': len(trails)},
+                            'No trails returned is not proof of no CloudTrail Lake, organization or linked-region coverage')
+            elif service == 'guardduty':
+                detectors = source.get('detectors', [])
+                add(32, context, CONTEXT_ONLY if state == 'LIST_VERIFIED'
+                    else PROPERTY_UNKNOWN, 'GuardDuty regional detector summary',
+                    {'state': state, 'detector_count': len(detectors),
+                     'detectors': detectors},
+                    'Regional detector status; features/organization configuration and ROS protection unverified')
+            elif service == 'securityhub':
+                add(33, context, CONTEXT_ONLY if state == 'HUB_OBSERVED'
+                    else PROPERTY_UNKNOWN, 'Security Hub regional standards summary',
+                    {'state': state, 'hub_arn': source.get('hub_arn'),
+                     'standards_state': source.get('standards_state'),
+                     'standards': source.get('standards', [])},
+                    'Hub existence/standards only; CIS controls, findings and ROS linkage unverified')
+
     summaries = {}
     for definition in CHECKS:
         matching = [r for r in rows if r['number'] == definition.number]
         counts = Counter(r['property_result'] for r in matching)
+        shared_count = sum(r['attribution'] == 'SHARED_UNATTRIBUTED' for r in matching)
+        region_errors = [
+            err for err in inventory.get('collection_errors', [])
+            if err.get('service') in (
+                {24: ('cloudtrail',), 25: ('cloudtrail',),
+                 32: ('guardduty',), 33: ('securityhub',)}.get(definition.number, ()))
+        ]
         summaries[str(definition.number)] = {
             'control_number': definition.number,
             'observed_resources': len(matching),
@@ -163,7 +272,16 @@ def build_product_observations(inventory: dict, regions: list[str]) -> dict:
             'fail': counts[PROPERTY_FAIL],
             'unknown': counts[PROPERTY_UNKNOWN],
             'context': counts[CONTEXT_ONLY],
-            'evidence_state': 'PARTIAL_RESOURCE_EVIDENCE' if matching else 'NO_RESOURCE_EVIDENCE',
+            'evidence_state': (
+                'NO_RESOURCE_EVIDENCE' if not matching
+                else (
+                    'SHARED_EVIDENCE_UNVERIFIED' if counts[PROPERTY_UNKNOWN] > 0
+                    else 'SHARED_CONTEXT_ONLY'
+                ) if shared_count == len(matching)
+                else 'PARTIAL_RESOURCE_EVIDENCE'
+            ),
+            'shared_context_count': shared_count,
+            'collection_error_count': len(region_errors),
             'product_wide_pass_proven': False,
         }
     return {

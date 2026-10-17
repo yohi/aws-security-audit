@@ -80,7 +80,7 @@ def build_web_review_bundle(metadata: dict, rows: list[dict], findings: list, in
         },
         'evidence_limitations': [
             'The original findings may contain capped lists; absence from evidence is not proof of absence.',
-            'Full account-scope deterministic investigation exists for controls #5 and #19; product-scope observations are PARTIAL_OBSERVED and not equivalent.',
+            'Product #5/#19 deep evidence remains PARTIAL_OBSERVED and must not be treated as complete account-wide proof.',
             'For product scope, individual collection_errors may indicate failed tag/config reads. Empty tags do not prove absence of ownership.',
             'Aurora deletion protection applies to DB clusters; member instances can still be deleted, affecting availability.',
             'Resource-level PROPERTY_OK and PROPERTY_FAIL are individual observed property checks, not a product-wide PASS or FAIL.',
@@ -88,7 +88,9 @@ def build_web_review_bundle(metadata: dict, rows: list[dict], findings: list, in
             'Product scope uses conservative identity evidence; shared/untagged services and inherited resources may be omitted.',
             'Only a limited subset of the 46 controls has resource-attribute verification; others have no direct product evidence.',
             'Partial-region results can never establish account-wide PASS.',
-            'SG ingress and ENI attachments do not establish actual internet reachability.',
+            'SG ingress and egress rules are present as configuration evidence; routes, ENI, reachability and least-privilege necessity remain unverified.',
+            'Product #16 and #22 may assert direct negative findings from verified ALB TLS protocol sets or S3 versioning/Object Lock states; unknown/shared resources are not product PASS.',
+            'Shared #24/#25 CloudTrail, #32 GuardDuty and #33 Security Hub attributes are account/regional CONTEXT_ONLY or UNKNOWN and are never inherited as product PASS.',
             'An LLM must not independently upgrade FAIL/UNKNOWN/MANUAL_REVIEW to PASS.',
             'AWS remediation, infrastructure modification, active probing, and write APIs are out of scope.',
         ],
@@ -126,9 +128,13 @@ WEB_REVIEW_PROMPT = """あなたはAWSセキュリティ監査の独立した調
 3. 各FAILについて、観測された設定とセキュリティ上の影響を分けて評価し、
    実際に証明されたこと／未証明のこと／誤検知の可能性を区別する。
 4. UNKNOWN・MANUAL_REVIEWの項目について、不足証拠と自動判定不能の理由を整理する。
-5. #5/#19について、account scopeの詳細証拠とproduct scopeのPARTIAL_OBSERVEDを明確に区別する。未収集のSGアウトバウンド/スナップショット等はUNKNOWNとして扱う。
+5. #5/#19について、account scopeの詳細証拠とproduct scopeのPARTIAL_OBSERVEDを明確に区別する。
+   SGのインバウンド/アウトバウンド設定は収集済みなら観測証拠として評価し、実際の到達性や業務上の必要性までは保証しない。
+   未収集のスナップショット、ENI経路、到達性等は未証明として扱う。
    #23はAuroraクラスターのDeletionProtectionとメンバーDBインスタンスの可用性保護を混同せず、両者の証拠を分けて評価する。
    resource_inventory.collection_errorsを確認し、タグ・属性の未取得と設定なしを区別する。
+   #16の旧TLSプロトコルと#22のS3 Versioning/Object Lockの明示的な負の証拠を評価する。
+   resource_inventory.shared_control_evidence は共通AWS統制であり、CloudTrail（#24/#25）、GuardDuty（#32）、Security Hub（#33）のリージョン別観測を別に報告する。ROS専用のPASS/FAILと混同しない。
 6. 重要度の高い検出事項を調査上の優先度で分類する。ただし改善案や是正手順は出さない。
 
 【出力】
@@ -139,6 +145,7 @@ WEB_REVIEW_PROMPT = """あなたはAWSセキュリティ監査の独立した調
 - 資産・属性別の検証結果（PROPERTY_OK / PROPERTY_FAIL / PROPERTY_UNKNOWN / CONTEXT_ONLY）と、資産属性の証拠がない項目の明示。元の46項目判定を書き換えない。
 - 未確認項目と証拠不足の整理
 - #5と#19の追加分析
+- #24/#25/#32/#33の共有統制観測（証拠あり・不足・AWS API失敗を区別し、プロダクト帰属を推定しない）
 - 総括（確定事実と未証明事項を厳密に分ける）
 
 各重要な主張には、添付JSON内のcontrol番号・region・evidence記録を示してください。
