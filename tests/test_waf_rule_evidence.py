@@ -249,3 +249,28 @@ def test_rule_count_is_never_promoted_to_product_pass():
     obs = build_product_observations({'resources': inventory}, [REGION])
     assert obs['by_control']['6']['context'] >= 1
     assert obs['by_control']['6']['ok'] == obs['by_control']['6']['fail'] == 0
+
+
+def test_rule_summary_does_not_verify_missing_action_or_unknown_union():
+    from copy import deepcopy
+    original = _web_acl()
+    for mutation in ('missing_action', 'contradictory_actions',
+                     'extra_unknown_statement', 'group_without_override',
+                     'direct_with_override'):
+        acl = deepcopy(original)
+        rule = acl['Rules'][1]
+        if mutation == 'missing_action':
+            rule.pop('Action')
+        elif mutation == 'contradictory_actions':
+            rule['OverrideAction'] = {'Count': {}}
+        elif mutation == 'extra_unknown_statement':
+            rule['Statement']['FutureUnknownStatement'] = {'Secret': 'SENSITIVE'}
+        elif mutation == 'group_without_override':
+            acl['Rules'][0].pop('OverrideAction')
+        elif mutation == 'direct_with_override':
+            rule.pop('Action')
+            rule['OverrideAction'] = {'Count': {}}
+        summary = web_acl_rule_summary(acl)
+        assert summary['state'] == 'PARTIAL_RULE_SUMMARY', mutation
+        assert summary['unclassified_rule_count'] >= 1
+        assert 'SENSITIVE' not in str(summary)
