@@ -369,3 +369,34 @@ def test_alb_waf_nonexistent_item_error_is_not_no_association(monkeypatch):
     assert result[0]['attributes']['waf_web_acl_lookup'] == 'UNVERIFIED'
     assert len(errors) == 1
     assert errors[0]['operation'] == 'get_web_acl_for_resource'
+
+
+def test_control6_error_count_only_includes_product_selected_web_acl_reads():
+    observed = _record(
+        'elbv2', 'application', REGION, 'ros-alb',
+        arn='arn:aws:elasticloadbalancing:ap-northeast-1:123456789012:'
+            'loadbalancer/app/ros-alb/1234',
+        tags=[{'Key': 'Product', 'Value': 'ros'}],
+        waf_web_acl_lookup='UNVERIFIED',
+    )
+    selected, _ = attribute_resources([observed], 'ros')
+    own_arn = selected[0]['arn']
+    inventory = {
+        'resources': selected,
+        'collection_errors': [
+            {'service': 'wafv2', 'operation': 'get_web_acl_for_resource',
+             'resource': own_arn, 'reason': 'AccessDenied'},
+            {'service': 'wafv2', 'operation': 'get_web_acl_for_resource',
+             'resource': 'arn:aws:elasticloadbalancing:ap-northeast-1:'
+                         '123456789012:loadbalancer/app/unrelated/1234',
+             'reason': 'AccessDenied'},
+            {'service': 'securityhub', 'operation': 'describe_hub',
+             'reason': 'InvalidAccessException'},
+        ],
+    }
+    matrix = build_product_observations(inventory, [REGION])
+    assert matrix['by_control']['6']['collection_error_count'] == 1
+    assert matrix['by_control']['6']['unknown'] == 1
+    assert matrix['by_control']['33']['collection_error_count'] == 1
+    assert matrix['by_control']['6']['ok'] == 0
+    assert matrix['by_control']['6']['fail'] == 0
