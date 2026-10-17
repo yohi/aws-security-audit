@@ -284,7 +284,12 @@ def _add_elb(ctx, region, out, errors):
                 response = api_call(ctx.client_cached('wafv2', region),
                                     'get_web_acl_for_resource', ResourceArn=arn)
                 acl = response.get('WebACL')
-                if acl is None:
+                if 'WebACL' not in response:
+                    observed['waf_web_acl_lookup'] = 'UNVERIFIED_SCHEMA'
+                    errors.append({'region': region, 'service': 'wafv2',
+                                   'operation': 'get_web_acl_for_resource',
+                                   'resource': arn, 'reason': 'WebACL field absent in response'})
+                elif acl is None:
                     observed['waf_web_acl_arn'] = None
                     observed['waf_web_acl_lookup'] = 'NOT_ASSOCIATED'
                 elif isinstance(acl, dict) and isinstance(acl.get('ARN'), str):
