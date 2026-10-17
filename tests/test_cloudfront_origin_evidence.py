@@ -188,3 +188,59 @@ def test_empty_cloudfront_waf_explicitly_no_cf_association_but_not_end_to_end_fa
     assert lines[0]['property_result'] == CONTEXT_ONLY
     assert {f.number: f for f in product_findings(
         {'resources': resources}, [REGION])}[6].status == 'MANUAL_REVIEW'
+
+
+def test_cloudfront_linkage_counters_show_unmatched_and_linked_distinctly():
+    resources = [
+        alb(),
+        cloudfront('linked', [ALB]),
+        cloudfront('unmatched', ['ros-origin.example.net']),
+        cloudfront('tagged', ['shared.example.net'], tags=[{'Key': 'Product', 'Value': 'ros'}]),
+    ]
+    selected, scope = attribute_resources(resources, 'ros')
+    c = scope['cloudfront_origin_linkage']
+    assert c['distribution_listing_state'] == 'COLLECTED_WITHOUT_LIST_ERROR'
+    assert c['distributions_observed'] == 3
+    assert c['direct_albs_with_dns_name'] == 1
+    assert c['linked_to_direct_alb_by_exact_origin'] == 1
+    assert c['directly_attributed'] == 1
+    assert c['unassigned'] == 1
+    assert len([r for r in selected if r['resource_type'] == 'distribution']) == 2
+    assert 'does not prove CloudFront is absent' in c['limit']
+
+
+def test_cloudfront_linkage_no_candidates_is_not_same_as_list_failure():
+    selected, scope = attribute_resources([alb()], 'ros')
+    counts = scope['cloudfront_origin_linkage']
+    assert counts['distribution_listing_state'] == 'COLLECTED_WITHOUT_LIST_ERROR'
+    assert counts['distributions_observed'] == 0
+    assert counts['direct_albs_with_dns_name'] == 1
+    assert counts['linked_to_direct_alb_by_exact_origin'] == 0
+
+
+def test_cloudfront_list_error_is_unverified_not_false_zero(monkeypatch):
+    import aws_security_audit.resource_scope as scope
+    from aws_security_audit.core import EvidenceUnavailable
+
+    class Ctx:
+        def guard_expiration(self):
+            pass
+
+    def ec2(ctx, region, output, errors):
+        output.append(alb())
+
+    monkeypatch.setattr(scope, '_add_ec2', ec2)
+    for name in ('_add_rds', '_add_elb', '_add_logs', '_add_s3', '_add_iam'):
+        monkeypatch.setattr(scope, name, lambda *args: None)
+    monkeypatch.setattr(scope, '_add_cloudfront', lambda *args:
+                        (_ for _ in ()).throw(EvidenceUnavailable('list timeout')))
+    monkeypatch.setattr(
+        'aws_security_audit.shared_security_evidence.collect_shared_security_evidence',
+        lambda *args: {'regions': [], 'attribution': 'SHARED_UNATTRIBUTED'})
+
+    inv = scope.collect_resource_inventory(Ctx(), [REGION], 'ros')
+    assert inv['scope']['cloudfront_origin_linkage']['distribution_listing_state'] == (
+        'UNVERIFIED_LIST_ERROR')
+    assert inv['scope']['cloudfront_origin_linkage']['distributions_observed'] == 0
+    assert any(e.get('operation') == 'list_distributions'
+               and e.get('service') == 'cloudfront' for e in inv['collection_errors'])
