@@ -276,7 +276,7 @@ def test_rule_summary_does_not_verify_missing_action_or_unknown_union():
         assert 'SENSITIVE' not in str(summary)
 
 
-def test_alb_web_acl_missing_field_is_unknown_explicit_null_is_no_association(monkeypatch):
+def test_alb_web_acl_missing_or_null_on_success_is_no_association(monkeypatch):
     import aws_security_audit.resource_scope as mod
 
     class LocalCtx:
@@ -299,7 +299,7 @@ def test_alb_web_acl_missing_field_is_unknown_explicit_null_is_no_association(mo
     monkeypatch.setattr(mod, 'paged', fake_paged)
     for response, expected_state, expected_errors in (
         ({'WebACL': None}, 'NOT_ASSOCIATED', 0),
-        ({}, 'UNVERIFIED_SCHEMA', 1),
+        ({}, 'NOT_ASSOCIATED', 0),
     ):
         def fake_api(client, operation, **kwargs):
             if operation == 'describe_tags':
@@ -314,6 +314,58 @@ def test_alb_web_acl_missing_field_is_unknown_explicit_null_is_no_association(mo
         _add_elb(LocalCtx(), REGION, records, errors)
         assert records[0]['attributes']['waf_web_acl_lookup'] == expected_state
         assert len(errors) == expected_errors
-        if expected_errors:
-            assert errors[0]['operation'] == 'get_web_acl_for_resource'
-            assert errors[0]['reason'] == 'WebACL field absent in response'
+        assert records[0]['attributes']['waf_web_acl_arn'] is None
+
+
+def test_botocore_null_web_acl_wire_shape_is_omitted_and_matches_valid_no_acl():
+    """Regression R10-QA-001: decode the actual WAFv2 wire shape via SDK parser."""
+    from botocore.session import Session
+    from botocore.parsers import create_parser
+
+    service = Session().get_service_model('wafv2')
+    operation = service.operation_model('GetWebACLForResource')
+    parser = create_parser(service.metadata['protocol'])
+    parsed = parser.parse({
+        'status_code': 200,
+        'headers': {'content-type': 'application/x-amz-json-1.1'},
+        'body': b'{"WebACL":null}',
+    }, operation.output_shape)
+    assert 'WebACL' not in parsed
+    assert parsed['ResponseMetadata']['HTTPStatusCode'] == 200
+
+
+def test_alb_waf_nonexistent_item_error_is_not_no_association(monkeypatch):
+    import aws_security_audit.resource_scope as mod
+
+    class LocalCtx:
+        def client_cached(self, service, region):
+            return service
+
+    def fake_paged(client, operation, field, **kwargs):
+        if operation == 'describe_load_balancers':
+            return [{
+                'LoadBalancerArn': (
+                    'arn:aws:elasticloadbalancing:ap-northeast-1:123456789012:'
+                    'loadbalancer/app/ros-alb/1234'),
+                'LoadBalancerName': 'ros-alb', 'Type': 'application',
+            }]
+        if operation == 'describe_listeners':
+            return []
+        raise AssertionError(operation)
+
+    def fake_api(client, operation, **kwargs):
+        if operation == 'describe_tags':
+            return {'TagDescriptions': []}
+        if operation == 'describe_load_balancer_attributes':
+            return {'Attributes': []}
+        if operation == 'get_web_acl_for_resource':
+            raise EvidenceUnavailable('WAFNonexistentItemException')
+        raise AssertionError(operation)
+
+    monkeypatch.setattr(mod, 'paged', fake_paged)
+    monkeypatch.setattr(mod, 'api_call', fake_api)
+    result, errors = [], []
+    _add_elb(LocalCtx(), REGION, result, errors)
+    assert result[0]['attributes']['waf_web_acl_lookup'] == 'UNVERIFIED'
+    assert len(errors) == 1
+    assert errors[0]['operation'] == 'get_web_acl_for_resource'
