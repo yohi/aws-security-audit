@@ -274,3 +274,46 @@ def test_rule_summary_does_not_verify_missing_action_or_unknown_union():
         assert summary['state'] == 'PARTIAL_RULE_SUMMARY', mutation
         assert summary['unclassified_rule_count'] >= 1
         assert 'SENSITIVE' not in str(summary)
+
+
+def test_alb_web_acl_missing_field_is_unknown_explicit_null_is_no_association(monkeypatch):
+    import aws_security_audit.resource_scope as mod
+
+    class LocalCtx:
+        def client_cached(self, service, region):
+            return service
+
+    def fake_paged(client, operation, field, **kwargs):
+        if operation == 'describe_load_balancers':
+            return [{
+                'LoadBalancerArn': (
+                    'arn:aws:elasticloadbalancing:ap-northeast-1:123456789012:'
+                    'loadbalancer/app/ros-alb/1234'),
+                'LoadBalancerName': 'ros-alb',
+                'Type': 'application',
+            }]
+        if operation == 'describe_listeners':
+            return []
+        raise AssertionError(operation)
+
+    monkeypatch.setattr(mod, 'paged', fake_paged)
+    for response, expected_state, expected_errors in (
+        ({'WebACL': None}, 'NOT_ASSOCIATED', 0),
+        ({}, 'UNVERIFIED_SCHEMA', 1),
+    ):
+        def fake_api(client, operation, **kwargs):
+            if operation == 'describe_tags':
+                return {'TagDescriptions': []}
+            if operation == 'describe_load_balancer_attributes':
+                return {'Attributes': []}
+            if operation == 'get_web_acl_for_resource':
+                return response
+            raise AssertionError(operation)
+        monkeypatch.setattr(mod, 'api_call', fake_api)
+        records, errors = [], []
+        _add_elb(LocalCtx(), REGION, records, errors)
+        assert records[0]['attributes']['waf_web_acl_lookup'] == expected_state
+        assert len(errors) == expected_errors
+        if expected_errors:
+            assert errors[0]['operation'] == 'get_web_acl_for_resource'
+            assert errors[0]['reason'] == 'WebACL field absent in response'
