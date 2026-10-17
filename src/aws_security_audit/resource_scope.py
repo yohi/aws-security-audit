@@ -16,6 +16,7 @@ from uuid import uuid4
 from .catalog import CHECKS
 from .core import EvidenceUnavailable, Finding, api_call, paged
 from .report import _private_bytes
+from .waf_rule_evidence import web_acl_rule_summary
 
 IDENTITY_TAGS = ('Name', 'Product', 'Project', 'Application', 'Service', 'Environment', 'Owner')
 PRODUCT_TAGS = ('Product', 'Project', 'Application', 'Service')
@@ -282,7 +283,19 @@ def _add_elb(ctx, region, out, errors):
             try:
                 response = api_call(ctx.client_cached('wafv2', region),
                                     'get_web_acl_for_resource', ResourceArn=arn)
-                observed['waf_web_acl_arn'] = (response.get('WebACL') or {}).get('ARN')
+                acl = response.get('WebACL')
+                if acl is None:
+                    observed['waf_web_acl_arn'] = None
+                    observed['waf_web_acl_lookup'] = 'NOT_ASSOCIATED'
+                elif isinstance(acl, dict) and isinstance(acl.get('ARN'), str):
+                    observed['waf_web_acl_arn'] = acl['ARN']
+                    observed['waf_web_acl_lookup'] = 'API_VERIFIED'
+                    observed['waf_rule_summary'] = web_acl_rule_summary(acl)
+                else:
+                    observed['waf_web_acl_lookup'] = 'UNVERIFIED_SCHEMA'
+                    errors.append({'region': region, 'service': 'wafv2',
+                                   'operation': 'get_web_acl_for_resource',
+                                   'resource': arn, 'reason': 'WebACL response lacks a valid ARN'})
             except EvidenceUnavailable as exc:
                 # A missing WebACL is distinct from no permission to inspect it.
                 observed['waf_web_acl_lookup'] = 'NOT_ASSOCIATED' if 'WAFNonexistentItemException' in str(exc) else 'UNVERIFIED'
@@ -592,6 +605,39 @@ def collect_resource_inventory(ctx, regions, product=None, product_tag=None):
             and err.get('operation') == 'list_tags_for_resource'
             for err in errors
         )
+    # Query WAF configuration only for selected CloudFront resources.
+    # The account may have many unrelated distributions with WAF rules.
+    if product is not None:
+        from .waf_rule_evidence import web_acl_rule_summary
+        for resource in selected:
+            if (resource['service'] != 'cloudfront' or
+                    resource['resource_type'] != 'distribution'):
+                continue
+            attrs = resource['attributes']
+            acl_arn = attrs.get('web_acl_id')
+            if acl_arn == '':
+                attrs['waf_rule_lookup'] = 'NOT_ASSOCIATED'
+                continue
+            if acl_arn is None:
+                attrs['waf_rule_lookup'] = 'UNVERIFIED_ASSOCIATION'
+                continue
+            if not isinstance(acl_arn, str) or not re.fullmatch(
+                    r'arn:aws:wafv2:us-east-1:[0-9]{12}:global/webacl/[\\w-]+/[0-9a-fA-F-]{36}',
+                    acl_arn):
+                attrs['waf_rule_lookup'] = 'UNSUPPORTED_WEB_ACL_IDENTIFIER'
+                continue
+            try:
+                ctx.guard_expiration()
+                response = api_call(
+                    ctx.client_cached('wafv2', 'us-east-1'), 'get_web_acl',
+                    ARN=acl_arn, Scope='CLOUDFRONT')
+                attrs['waf_rule_summary'] = web_acl_rule_summary(response.get('WebACL'))
+                attrs['waf_rule_lookup'] = attrs['waf_rule_summary']['state']
+            except EvidenceUnavailable as exc:
+                attrs['waf_rule_lookup'] = 'UNVERIFIED_READ_ERROR'
+                errors.append({'region': 'global', 'service': 'wafv2',
+                               'operation': 'get_web_acl', 'resource': acl_arn,
+                               'reason': str(exc)[:180]})
     shared = None
     if product is not None:
         from .shared_security_evidence import collect_shared_security_evidence
@@ -618,9 +664,11 @@ PRODUCT_OBSERVATION_FIELDS = {
     1: {'instance': ('state', 'public_ipv4', 'subnet_id', 'vpc_id')},
     2: {'db-instance': ('publicly_accessible', 'cluster_id', 'engine')},
     5: {'security-group': ('dangerous_ingress', 'vpc_id', 'ingress_rules', 'egress_rules')},
-    6: {'application': ('scheme', 'waf_web_acl_arn', 'waf_web_acl_lookup'),
+    6: {'application': ('scheme', 'waf_web_acl_arn', 'waf_web_acl_lookup',
+                       'waf_rule_summary'),
         'distribution': ('origin_domains', 'web_acl_id', 'enabled',
-                         'distribution_status', 'web_acl_metadata_source')},
+                         'distribution_status', 'web_acl_metadata_source',
+                         'waf_rule_lookup', 'waf_rule_summary')},
     7: {'distribution': ('geo_restriction_type', 'geo_restriction_location_count')},
     14: {'instance': ('state', 'subnet_id')},
     16: {'application': ('listeners', 'scheme'),
