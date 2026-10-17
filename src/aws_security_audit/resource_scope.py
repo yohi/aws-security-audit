@@ -622,7 +622,7 @@ def collect_resource_inventory(ctx, regions, product=None, product_tag=None):
                 attrs['waf_rule_lookup'] = 'UNVERIFIED_ASSOCIATION'
                 continue
             if not isinstance(acl_arn, str) or not re.fullmatch(
-                    r'arn:aws:wafv2:us-east-1:[0-9]{12}:global/webacl/[\\w-]+/[0-9a-fA-F-]{36}',
+                    r'arn:aws:wafv2:us-east-1:[0-9]{12}:global/webacl/[A-Za-z0-9_-]+/[0-9a-fA-F-]{36}',
                     acl_arn):
                 attrs['waf_rule_lookup'] = 'UNSUPPORTED_WEB_ACL_IDENTIFIER'
                 continue
