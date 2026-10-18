@@ -328,6 +328,13 @@ def build_product_observations(inventory: dict, regions: list[str]) -> dict:
         matching = [r for r in rows if r['number'] == definition.number]
         counts = Counter(r['property_result'] for r in matching)
         shared_count = sum(r['attribution'] == 'SHARED_UNATTRIBUTED' for r in matching)
+        s3_access_provenance = {
+            resource['resource_id']
+            for resource in inventory.get('resources', [])
+            if resource.get('service') == 's3'
+            and resource.get('resource_type') == 'bucket'
+            and resource.get('attribution') == 'DIRECT'
+        }
         waf_provenance = {
             identifier
             for resource in inventory.get('resources', [])
@@ -349,6 +356,14 @@ def build_product_observations(inventory: dict, regions: list[str]) -> dict:
                     'get_web_acl_for_resource', 'get_web_acl'
                 )
                 and err.get('resource') in waf_provenance
+            )
+            or (
+                definition.number == 18
+                and err.get('service') == 's3'
+                and err.get('operation') in (
+                    'get_bucket_policy_status', 'get_bucket_ownership_controls'
+                )
+                and err.get('resource') in s3_access_provenance
             )
         ]
         summaries[str(definition.number)] = {
