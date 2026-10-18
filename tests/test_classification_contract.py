@@ -43,7 +43,7 @@ def _inputs():
     bundle = {
         'controls': controls,
         'resource_inventory': inv,
-        'decision_support': build_decision_support(controls, inv),
+        'decision_support': build_decision_support(controls, inv, r21_contract=True),
         'supplemental_evidence': [],
     }
     scope = bundle['decision_support']['shared_scope_contract']
