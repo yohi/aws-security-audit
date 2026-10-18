@@ -9,6 +9,7 @@ from __future__ import annotations
 from collections import Counter
 
 from .catalog import CHECKS
+from .classification_contract import output_contract, validate_r21_result
 from .evidence_reconciliation import reconcile_control
 from .shared_evidence import build_cross_control_evidence, build_shared_scope_contract
 
@@ -109,7 +110,7 @@ def _source_refs(control: dict, observations: list[dict]) -> list[dict]:
     return refs
 
 
-def build_decision_support(controls: list[dict], inventory: dict) -> dict:
+def build_decision_support(controls: list[dict], inventory: dict, *, r21_contract: bool = False) -> dict:
     """Non-decisional acquisition plan. Never maps scanner status to final label."""
     if len(controls) != 46 or {row.get('number') for row in controls} != set(range(1, 47)):
         raise ValueError('46 unique normative control IDs required')
@@ -143,6 +144,7 @@ def build_decision_support(controls: list[dict], inventory: dict) -> dict:
         })
     return {
         'schema': 'aws-security-decision-support-v1',
+        **({'output_contract': output_contract()} if r21_contract else {}),
         'shared_scope_contract': common_scope,
         'cross_control_evidence': cross,
         'goal': 'OFFLINE_46_CONTROL_FOUR_STATE_CLASSIFICATION',
@@ -200,8 +202,15 @@ def validate_classification_result(bundle: dict, result: dict) -> dict:
     if (not isinstance(support, dict)
             or support.get('schema') != 'aws-security-decision-support-v1'):
         raise ValueError('Versioned decision support is required')
-    if result.get('schema') != 'aws-security-offline-classification-v1':
+    result_schema = result.get('schema')
+    if result_schema not in ('aws-security-offline-classification-v1',
+                             'aws-security-offline-classification-v2'):
         raise ValueError('Unsupported classification schema')
+    has_r21 = support.get('output_contract') is not None
+    if has_r21 and result_schema != 'aws-security-offline-classification-v2':
+        raise ValueError('R21 evidence bundle requires strict v2 classification result')
+    if not has_r21 and result_schema != 'aws-security-offline-classification-v1':
+        raise ValueError('Legacy evidence bundle requires v1 classification result')
     plans = support.get('plans')
     bundle_controls = bundle.get('controls')
     if (not isinstance(bundle_controls, list)
@@ -288,9 +297,15 @@ def validate_classification_result(bundle: dict, result: dict) -> dict:
             or summary.get('pending_count') != counts['pending']
             or counts['finalized'] + counts['pending'] != 46):
         raise ValueError('Classification summary totals inconsistent with 46 rows')
+    if 'classifications' in summary:
+        raise ValueError('Nested summary.classifications is not valid; put labels directly in summary')
     for label in FINAL_LABELS:
         if summary.get(label, 0) != counts[label]:
             raise ValueError('Business-label summary does not match rows')
+    r21 = (validate_r21_result(bundle, result)
+           if result_schema == 'aws-security-offline-classification-v2'
+           else {'r21_request_schema_check': 'NOT_PERFORMED_LEGACY_V1',
+                 'semantic_compliance_verified': False})
     return {
         'schema': 'aws-security-classification-validation-v1',
         'structure_and_reference_check': 'PASS',
@@ -299,6 +314,8 @@ def validate_classification_result(bundle: dict, result: dict) -> dict:
         'finalized_count': counts['finalized'],
         'pending_count': counts['pending'],
         'counts': {label: counts[label] for label in sorted(FINAL_LABELS)},
+        'result_contract': result_schema,
+        'r21': r21,
         'citation_quality_warnings': advisory_warnings,
         'status': 'INCOMPLETE' if counts['pending'] else 'ALL_ROWS_CLASSIFIED_OWNER_REVIEW_PENDING',
     }

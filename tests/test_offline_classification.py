@@ -38,12 +38,16 @@ def _bundle():
                          'observed_value': ['TLSv1.0'],
                      }],
                  }}
-    return build_web_review_bundle(
+    bundle = build_web_review_bundle(
         {'requested_regions': ['ap-northeast-1'], 'audit_scope': 'product',
          'product': 'ros', 'timestamp': '2026-10-18T05:44:17+00:00'},
         rows, findings, {'schema': 'test', 'regions_checked': [],
                          'deep_evidence': {}, 'limitations': []},
         resource_inventory=inventory)
+    # This helper exercises historical v1 output compatibility.
+    # Real R21 Web handoffs retain this field and require v2.
+    bundle['decision_support'].pop('output_contract')
+    return bundle
 
 
 def _response(bundle):
