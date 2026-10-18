@@ -168,11 +168,13 @@ def validate_classification_result(bundle: dict, result: dict) -> dict:
     bundle_controls = bundle.get('controls')
     if (not isinstance(bundle_controls, list)
             or len(bundle_controls) != 46
-            or [p.get('number') if isinstance(p, dict) else None
+            or [(p.get('number') if type(p.get('number')) is int else None)
+                if isinstance(p, dict) else None
                 for p in bundle_controls] != list(range(1, 47))):
         raise ValueError('Evidence bundle must contain normative 46 controls')
     if (not isinstance(plans, list) or len(plans) != 46
-            or [p.get('number') if isinstance(p, dict) else None
+            or [(p.get('number') if type(p.get('number')) is int else None)
+                if isinstance(p, dict) else None
                 for p in plans] != list(range(1, 47))):
         raise ValueError('Decision support must contain ordered 46 plans')
     inventory = bundle.get('resource_inventory') or {}
@@ -185,7 +187,8 @@ def validate_classification_result(bundle: dict, result: dict) -> dict:
     controls = result.get('controls')
     if not isinstance(controls, list) or len(controls) != 46:
         raise ValueError('Classification must contain all 46 controls')
-    identifiers = [r.get('number') if isinstance(r, dict) else None for r in controls]
+    identifiers = [(r.get('number') if type(r.get('number')) is int else None)
+                   if isinstance(r, dict) else None for r in controls]
     if identifiers != list(range(1, 47)):
         raise ValueError('Classifications must be ordered No.1 to No.46 exactly once')
     plan_lookup = {p['number']: p for p in plans}
@@ -215,8 +218,8 @@ def validate_classification_result(bundle: dict, result: dict) -> dict:
                 raise ValueError(f'Pending #{number} requires null classification and missing evidence')
             counts['pending'] += 1
         else:
-            if label not in FINAL_LABELS or not refs:
-                raise ValueError(f'Finalized #{number} requires valid label and attributable evidence')
+            if label not in FINAL_LABELS or not refs or missing:
+                raise ValueError(f'Finalized #{number} needs label, proof and no blocking gaps')
             counts['finalized'] += 1
             counts[label] += 1
     summary = result.get('summary')
