@@ -48,6 +48,16 @@ def parser() -> argparse.ArgumentParser:
         help='Validate manually saved LLM 46-control JSON result against an offline evidence bundle; no AWS connection')
     offline.add_argument('--bundle', required=True, help='Local aws_web_review JSON evidence package')
     offline.add_argument('--result', required=True, help='Local LLM JSON classification result')
+    progress = sub.add_parser(
+        'report-progress',
+        help='Build evidence-first 46-control progress report from saved files only; no AWS',
+    )
+    progress.add_argument('--bundle', required=True)
+    progress.add_argument('--classification', help='Saved v2 classification candidate (optional)')
+    progress.add_argument('--r24', help='Saved R24 operator-read evidence JSON (optional)')
+    progress.add_argument('--mcp-summary', help='Explicit operator-curated MCP summary (optional)')
+    progress.add_argument('--account', help='Expected AWS account for supplemental evidence')
+    progress.add_argument('--out', required=True, help='Private output directory')
     sub.add_parser('version', help='Show package version')
     return p
 
@@ -295,6 +305,33 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps(checked, ensure_ascii=False, sort_keys=True))
             # A well-formed but unresolved report is incomplete by design.
             return 2 if checked['pending_count'] else 0
+        if args.command == 'report-progress':
+            # Explicitly offline: do not invoke prepare(), boto3, or AWS sessions.
+            from .evidence_progress_report import build_evidence_progress, save_progress_report
+            try:
+                if (args.r24 or args.mcp_summary) and not args.account:
+                    raise ValueError('--account is mandatory for supplemental evidence')
+                def load(path):
+                    if path is None:
+                        return None
+                    with Path(path).open(encoding='utf-8') as stream:
+                        return json.load(stream)
+                bundle = load(args.bundle)
+                classification = load(args.classification)
+                r24 = load(args.r24)
+                mcp_summary = load(args.mcp_summary)
+                progress = build_evidence_progress(
+                    bundle, classification, r24=r24, mcp_summary=mcp_summary,
+                    expected_account=args.account,
+                )
+                paths = save_progress_report(args.out, progress)
+            except (OSError, ValueError, TypeError, KeyError) as exc:
+                print(f'Progress report failed: {type(exc).__name__}', file=sys.stderr)
+                return 1
+            print(json.dumps(progress['summary'], ensure_ascii=False, sort_keys=True))
+            for path in paths:
+                print(f'Report: {path}')
+            return 0
         ctx, regions = prepare(args)
         print(f'Assumed role (STS): {ctx.identity_arn} | source: {ctx.source_profile}', flush=True)
         print('STS session policy: ReadOnlyAccess (role/session-policy intersection; resource-based grants may bypass implicit denial; EFFECTIVE_NO_WRITE=NOT_PROVEN)', flush=True)
@@ -387,10 +424,17 @@ def main(argv: list[str] | None = None) -> int:
             else:
                 from .investigation import save_investigation
                 paths.extend(save_investigation(args.out, investigation, llm_export=False))
+            from .web_handoff import build_web_review_bundle
+            from .evidence_progress_report import build_evidence_progress, save_progress_report
+            bundle = build_web_review_bundle(metadata, overview, records, investigation,
+                                             resource_inventory=inventory)
+            progress = build_evidence_progress(bundle)
+            stamp = metadata['timestamp'].replace(':', '-').replace('+', '-')
+            paths.extend(save_progress_report(
+                args.out, progress, basename=f'aws_evidence_progress_{stamp}',
+            ))
             if args.llm == 'export':
-                from .web_handoff import build_web_review_bundle, save_web_handoff
-                bundle = build_web_review_bundle(metadata, overview, records, investigation,
-                                                 resource_inventory=inventory)
+                from .web_handoff import save_web_handoff
                 paths.extend(save_web_handoff(args.out, bundle))
                 print('WEB HANDOFF: attach aws_web_review_*.json to ChatGPT/Gemini Web and paste aws_web_prompt_*.md', flush=True)
                 print('SENSITIVE DATA NOTICE: inspect the attachment before uploading; it contains original finding evidence', flush=True)
