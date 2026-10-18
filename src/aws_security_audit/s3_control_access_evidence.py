@@ -75,9 +75,10 @@ def _bucket_region(ctx, bucket, errors):
                resource=bucket, service='s3')
         return None
     if not isinstance(response, dict) or 'LocationConstraint' not in response:
-        # Botocore may omit an explicit None-valued member for us-east-1.
-        # The location API returns no LocationConstraint for that region.
-        if not isinstance(response, dict) or response:
+        # Botocore may omit the null LocationConstraint in us-east-1.
+        # Other unexpected response keys are rejected; ResponseMetadata is SDK-only.
+        if not isinstance(response, dict) or (
+                set(response) - {'ResponseMetadata'}):
             _error(errors, 'global', 'get_bucket_location',
                    'Successful bucket location response schema unverified',
                    resource=bucket, service='s3')
@@ -125,7 +126,11 @@ def _list_bucket_access_points(ctx, region, bucket, errors):
             points.append(item['Name'])
         next_token = response.get('NextToken')
         if next_token is None:
-            return sorted(set(points)) if len(points) == len(set(points)) else None
+            if len(points) != len(set(points)):
+                _error(errors, region, 'list_access_points',
+                       'Duplicate access point identity in listing', resource=bucket)
+                return None
+            return sorted(points)
         if (not isinstance(next_token, str) or not next_token
                 or next_token in visited):
             _error(errors, region, 'list_access_points',
@@ -185,9 +190,12 @@ def collect_selected_s3_control_evidence(ctx, selected, errors):
         # Offline fake contexts without an AWS account cannot probe S3Control.
         # Real AuditContext binds the exact account from the assumed-role ARN.
         return None
-    shared = _account_bpa(ctx, ctx.region, errors) if isinstance(
-        getattr(ctx, 'region', None), str) else _account_bpa(
-            ctx, 'ap-northeast-1', errors)
+    account_region = getattr(ctx, 'region', None)
+    if not isinstance(account_region, str) or not REGION_PATTERN.fullmatch(
+            account_region):
+        # Missing runtime region never justifies inventing an endpoint.
+        return None
+    shared = _account_bpa(ctx, account_region, errors)
     for resource in buckets:
         name = resource['resource_id']
         attrs = resource['attributes']
