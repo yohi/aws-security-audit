@@ -32,6 +32,15 @@ For each of the 46 controls, R25 separates:
 5. Optional R24 read evidence states and separately curated MCP configuration
    facts, with **no automatic compliance reclassification**.
 
+Cross-control reuse: a DIRECT, automated, encrypted RDS cluster snapshot
+already observed for #20 also contributes a tightly bounded **backup exists**
+context to #45. This is now included in the machine-evidence coverage count,
+without granting #45 a final status or establishing any successful restore
+drill. Thus a run with the full frozen October 18 ROS source and the MCP
+summary can count 24/46 controls with some machine evidence (instead of 23/46
+when #45 was omitted). Other data sources may legitimately yield different
+counts.
+
 Counts for the original acquisition routes are 15 AWS read-only candidates,
 24 AWS+Owner scope, 3 non-AWS machine evidence and 4 Owner documentation
 controls (#42/#43/#44/#46). This means four DOCUMENTATION ROUTES, not exactly
