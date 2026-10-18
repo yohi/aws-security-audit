@@ -196,6 +196,28 @@ def build_product_observations(inventory: dict, regions: list[str]) -> dict:
                          else CONTEXT_ONLY)
                 add(18, r, state, 'bucket_public_access_block', {k: bpa.get(k) for k in flags},
                     'Bucket-level BPA only; account-level, policy and actual exposure unverified')
+            # Product-selected S3 policy and ownership are bounded configuration
+            # signals. They cannot establish effective public reachability
+            # without account/org BPA, access points and all ACL/policy paths.
+            if 'bucket_policy_status_lookup' in attrs:
+                status = attrs['bucket_policy_status_lookup']
+                public = attrs.get('bucket_policy_is_public')
+                state = (CONTEXT_ONLY if status == 'API_VERIFIED'
+                         and type(public) is bool else PROPERTY_UNKNOWN)
+                add(18, r, state, 'S3 bucket policy public status',
+                    {'lookup': status, 'is_public': public},
+                    'PolicyStatus only; absent policy, account/org BPA, ACL and '
+                    'access-point reachability are not certified')
+            if 'bucket_ownership_lookup' in attrs:
+                status = attrs['bucket_ownership_lookup']
+                mode = attrs.get('bucket_object_ownership')
+                state = (CONTEXT_ONLY if status == 'API_VERIFIED'
+                         and mode in ('BucketOwnerEnforced', 'BucketOwnerPreferred',
+                                      'ObjectWriter') else PROPERTY_UNKNOWN)
+                add(18, r, state, 'S3 bucket object ownership mode',
+                    {'lookup': status, 'object_ownership': mode},
+                    'Object Ownership is configuration context only; raw grants, '
+                    'cross-account permissions and effective public access unverified')
             versioning = attrs.get('versioning_status')
             lock = attrs.get('object_lock_enabled')
             if versioning == 'Enabled' or lock is True:
