@@ -211,6 +211,20 @@ def test_legacy_v1_is_explicitly_not_r21_conformance():
     assert check['semantic_compliance_verified'] is False
 
 
+def test_r21_bundle_strictly_rejects_legacy_v1_output():
+    bundle, result = _inputs()
+    result['schema'] = 'aws-security-offline-classification-v1'
+    with pytest.raises(ValueError, match='requires strict v2'):
+        validate_classification_result(bundle, result)
+
+
+def test_legacy_bundle_does_not_accept_v2_with_strict_claims():
+    bundle, result = _inputs()
+    bundle['decision_support'].pop('output_contract')
+    with pytest.raises(ValueError, match='requires v1'):
+        validate_classification_result(bundle, result)
+
+
 def test_reconciliation_fact_codes_belong_to_same_control():
     bundle, result = _inputs()
     result['controls'][4]['evidence_claims'][0]['verified_fact_code'] = (
