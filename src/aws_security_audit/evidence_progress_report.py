@@ -280,8 +280,20 @@ def render_markdown(report: dict) -> str:
         '- 追加証拠込み機械情報あり: ' +
         str(summary['controls_with_some_machine_evidence_including_supplements']) +
         '/46項目（全項目の適合を意味しない）',
-        '- オフライン分類保留: ' + str(summary['evidence_pending_controls']) +
-        '（未提供ならNone）',
+        '- オフライン分類: ' + (
+            str(summary['evidence_pending_controls']) + '件保留（提出された分類候補）'
+            if summary['evidence_pending_controls'] is not None
+            else '未評価（分類ファイル未入力）'
+        ),
+        '- R24補足証拠: ' + ('取込済み' if report['source_validation']['r24_supplied'] else '未取込') +
+        ' / MCP補足要約: ' + ('取込済み' if report['source_validation']['mcp_summary_supplied'] else '未取込'),
+        '- 対象資産の網羅性: ' + (
+            '要確認（Productタグ等による限定抽出）'
+            if report.get('source_bundle_execution', {}).get('product_attribution_complete') is False
+            else '元監査結果を参照'
+        ),
+        '- #45への横断証拠: ' + str(summary.get('cross_control_machine_evidence_refs', 0)) +
+        '件（スナップショット存在証拠であり復旧訓練の証明ではない）',
         '- 運用文書が主経路: ' +
         ', '.join('#' + str(x) for x in summary['owner_documentation_controls']),
         '- Owner最終採用: 未検証',
