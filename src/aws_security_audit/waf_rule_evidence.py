@@ -57,8 +57,13 @@ def web_acl_rule_summary(acl):
         # groups, Action for a standalone statement. A missing, invalid, or
         # contradictory action must never produce VERIFIED_SUMMARY.
         expected_override = statement in GROUP_STATEMENTS
-        valid_action = (override is not None and action is None) if expected_override else (
-            action is not None and override is None)
+        # Presence and validity must be checked separately. A malformed
+        # extra Action/OverrideAction cannot disappear as a None parsed value.
+        valid_action = (
+            ('Action' not in rule and 'OverrideAction' in rule and override is not None)
+            if expected_override else
+            ('Action' in rule and 'OverrideAction' not in rule and action is not None)
+        )
         if statement is None or not valid_action:
             incomplete += 1
             continue
