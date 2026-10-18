@@ -456,21 +456,36 @@ Reuse `_private_bytes`, `_safe_spreadsheet` and current XML escaping.
 `README.md` documentation routing; create `docs/evidence-traceable-reporting.md`
 and `tests/test_reporting_workflow.py`.
 
-**Interfaces:** Existing `assess` / `report-progress` CLI flags and exit codes
-remain. `assess` wraps only existing collection in `capture_reads()`, attaches
-the ledger, builds one review model and passes it to every exporter.
-`report-progress` reconstructs review data solely from supplied local files.
-Use optional keyword arguments when extending existing export functions.
+**Interfaces:** Preserve the existing `assess` flags and exit codes. Add a new
+offline `report-progress` command with required `--bundle PATH` (a local
+`aws_web_review` JSON evidence bundle), optional `--classification PATH` (a
+local classification JSON result), and `--out DIR` (default `reports`). It
+reconstructs review data solely from these local files and writes the progress
+JSON/CSV/XLSX exports and Markdown summary; it must not initialize AWS sessions,
+load AWS credentials or make network calls. Return exit code `0` when export
+succeeds with no unresolved requests, `2` when export succeeds but unresolved
+requests remain, and `1` for invalid input or export failure. `assess` wraps
+only existing collection in `capture_reads()`, attaches the ledger, builds one
+review model and passes it to every exporter. Register `report-progress` in
+`cli.py`'s parser and dispatch it in `main()` before `prepare()` so the offline
+contract is enforced. Use optional keyword arguments when extending existing
+export functions.
 
-- [ ] Write a fake-context `assess --llm off` end-to-end test: expected old and
-  new outputs exist and AWS operation sequence is unchanged. Repeat with
-  `--llm export`: Web ledger/review equal the report's source model.
+- [ ] Write parser/dispatch tests for `report-progress` flags and exit codes,
+  including successful complete and unresolved exports, invalid local input,
+  and export failure. Add a fake-context `assess --llm off` end-to-end test:
+  expected old and new outputs exist and AWS operation sequence is unchanged.
+  Repeat with `--llm export`: Web ledger/review equal the report's source model.
   Run `report-progress` with boto3 session creation and network calls patched
-  to raise; require success for a valid legacy bundle and failure for forged
-  evidence. Assert no SDK call, source rewrite, or business-label upgrade.
+  to raise; require exit `0` for a valid complete legacy bundle, exit `2` for
+  valid output with unresolved requests, and exit `1` for forged evidence.
+  Assert no SDK call, source rewrite, or business-label upgrade.
 - [ ] Run `uv run --locked pytest tests/test_reporting_workflow.py -q`; expect FAIL.
-- [ ] Implement integration and document schema, field meanings, legacy limits,
-  file relationships and a single offline example using relative private paths.
+- [ ] Implement `report-progress` parser registration and `main()` dispatch
+  before AWS preparation; integrate both offline `report-progress` and live
+  `assess` paths. Document the command flags, exit codes, schema, field meanings,
+  legacy limits, file relationships and a single offline example using relative
+  private paths.
   Document partial failure and source-digest limits, not source attestation.
 - [ ] Run `uv run --locked pytest -q`,
   `uv run --locked ruff check` on changed Python paths,
