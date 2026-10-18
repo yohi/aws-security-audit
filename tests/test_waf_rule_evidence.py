@@ -421,3 +421,54 @@ def test_malformed_extra_action_field_never_proves_verified_summary():
         assert result['unclassified_rule_count'] == 1
         assert result['rule_count'] == 2
         assert 'SENSITIVE' not in str(result)
+
+def test_cloudfront_malformed_success_response_has_provenance_error(monkeypatch):
+    """Transport success cannot certify a missing or different Web ACL identity."""
+    from copy import deepcopy
+
+    malformed = [
+        {},
+        {'WebACL': None},
+        {'WebACL': []},
+        {'WebACL': {}},
+        {'WebACL': {'ARN': None}},
+        {'WebACL': {'ARN': 'arn:aws:wafv2:us-east-1:123456789012:global/webacl/'
+                    'other/12345678-1234-1234-1234-123456789012'}},
+    ]
+    wrong_valid_acl = deepcopy(_web_acl())
+    wrong_valid_acl['ARN'] = ARN.replace('shared-web-acl', 'other-acl')
+    malformed.append({'WebACL': wrong_valid_acl})
+
+    for response in malformed:
+        mod = _prepare_collection(
+            monkeypatch,
+            lambda: [_linked_cloudfront('selected', tags=[
+                {'Key': 'Product', 'Value': 'ros'}])],
+        )
+        calls = []
+
+        def api(client, operation, **kwargs):
+            calls.append((client, operation, kwargs))
+            return response
+
+        monkeypatch.setattr(mod, 'api_call', api)
+        inventory = collect_resource_inventory(Ctx(), [REGION], 'ros')
+        assert len(calls) == 1
+        assert calls[0][0] == ('wafv2', 'us-east-1')
+        assert calls[0][1] == 'get_web_acl'
+        assert calls[0][2] == {'ARN': ARN, 'Scope': 'CLOUDFRONT'}
+        selected = inventory['resources']
+        assert len(selected) == 1
+        attrs = selected[0]['attributes']
+        assert attrs['waf_rule_lookup'] == 'UNVERIFIED_SCHEMA'
+        assert 'waf_rule_summary' not in attrs
+        errors = inventory['collection_errors']
+        assert len(errors) == 1
+        assert errors[0]['operation'] == 'get_web_acl'
+        assert errors[0]['resource'] == ARN
+        assert errors[0]['reason'] == 'WebACL response lacks the requested ARN'
+        assert 'SENSITIVE' not in str(inventory)
+        obs = build_product_observations(inventory, [REGION])
+        assert obs['by_control']['6']['unknown'] >= 1
+        assert obs['by_control']['6']['collection_error_count'] == 1
+        assert obs['by_control']['6']['ok'] == obs['by_control']['6']['fail'] == 0
