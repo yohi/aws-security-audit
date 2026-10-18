@@ -80,7 +80,10 @@ def _validate_mcp(bundle: dict, mcp: dict | None, account: str | None):
     if (not isinstance(mcp, dict) or set(mcp) != {
             'schema', 'account', 'region', 'product', 'source', 'records'}
             or mcp['schema'] != MCP_SCHEMA
-            or mcp['source'] != 'OPERATOR_CURATED_MCP_READONLY_SUMMARY'
+            or mcp['source'] not in (
+                'OPERATOR_CURATED_MCP_READONLY_SUMMARY',
+                'ASSISTANT_CURATED_MCP_READONLY_SUMMARY',
+            )
             or mcp['product'] != bundle.get('execution', {}).get('product')
             or mcp['region'] not in bundle.get('execution', {}).get('requested_regions', [])
             or not isinstance(mcp['account'], str) or len(mcp['account']) != 12
@@ -187,7 +190,7 @@ def build_evidence_progress(
     measured = sum(any(row['property_observation_counts'].values()) for row in rows)
     with_new = sum(
         any(row['property_observation_counts'].values())
-        or any(r.get('state') not in ('NOT_REQUESTED', 'NON_AWS_EXPORT_REQUIRED')
+        or any(r.get('state') in ('OBSERVED', 'OBSERVED_PARTIAL', 'VERIFIED')
                for r in row['r24_evidence'])
         or bool(row['mcp_summary_observations'])
         for row in rows
@@ -224,6 +227,7 @@ def build_evidence_progress(
                 validation['r21']['r21_request_schema_check'] if validation else 'NOT_PROVIDED',
             'r24_supplied': r24 is not None,
             'mcp_summary_supplied': mcp_summary is not None,
+            'mcp_summary_source': mcp_summary.get('source') if mcp_summary else None,
             'mcp_summary_independent_runtime_attestation': False,
         },
         'controls': rows,
