@@ -725,7 +725,10 @@ def collect_resource_inventory(ctx, regions, product=None, product_tag=None):
                                'operation': 'get_web_acl', 'resource': acl_arn,
                                'reason': str(exc)[:180]})
     shared = None
+    s3_account_access = None
     if product is not None:
+        from .s3_control_access_evidence import collect_selected_s3_control_evidence
+        s3_account_access = collect_selected_s3_control_evidence(ctx, selected, errors)
         from .shared_security_evidence import collect_shared_security_evidence
         shared = collect_shared_security_evidence(ctx, regions, errors)
     scope['service_counts'] = dict(Counter(r['service'] for r in selected))
@@ -743,6 +746,8 @@ def collect_resource_inventory(ctx, regions, product=None, product_tag=None):
             ]}
     if shared is not None:
         report['shared_control_evidence'] = shared
+    if s3_account_access is not None:
+        report['shared_s3_account_access_evidence'] = s3_account_access
     return report
 
 
