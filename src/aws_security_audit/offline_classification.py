@@ -124,8 +124,8 @@ def build_decision_support(controls: list[dict], inventory: dict) -> dict:
     }
 
 
-def _supplemental_ids(bundle: dict) -> set[str]:
-    result = set()
+def _supplemental_ids(bundle: dict) -> dict[str, set[int]]:
+    result = {}
     supplied = bundle.get('supplemental_evidence', [])
     if not isinstance(supplied, list):
         raise ValueError('supplemental_evidence must be a list')
@@ -136,12 +136,17 @@ def _supplemental_ids(bundle: dict) -> set[str]:
                     ch.isalnum() or ch in '-_.' for ch in item['id'])
                 or not isinstance(item.get('source'), str) or not item['source']
                 or not isinstance(item.get('collected_at'), str)
-                or not item['collected_at']):
-            raise ValueError('Invalid supplemental evidence provenance')
+                or not item['collected_at']
+                or not isinstance(item.get('control_numbers'), list)
+                or not item['control_numbers']
+                or any(type(n) is not int or not 1 <= n <= 46
+                       for n in item['control_numbers'])
+                or len(item['control_numbers']) != len(set(item['control_numbers']))):
+            raise ValueError('Invalid supplemental evidence provenance/scope')
         ref = 'supplemental:' + item['id']
         if ref in result:
             raise ValueError('Duplicated supplemental evidence ID')
-        result.add(ref)
+        result[ref] = set(item['control_numbers'])
     return result
 
 
@@ -160,9 +165,23 @@ def validate_classification_result(bundle: dict, result: dict) -> dict:
     if result.get('schema') != 'aws-security-offline-classification-v1':
         raise ValueError('Unsupported classification schema')
     plans = support.get('plans')
+    bundle_controls = bundle.get('controls')
+    if (not isinstance(bundle_controls, list)
+            or len(bundle_controls) != 46
+            or [p.get('number') if isinstance(p, dict) else None
+                for p in bundle_controls] != list(range(1, 47))):
+        raise ValueError('Evidence bundle must contain normative 46 controls')
     if (not isinstance(plans, list) or len(plans) != 46
-            or {p.get('number') for p in plans} != set(range(1, 47))):
-        raise ValueError('Decision support must contain 46 unique plans')
+            or [p.get('number') if isinstance(p, dict) else None
+                for p in plans] != list(range(1, 47))):
+        raise ValueError('Decision support must contain ordered 46 plans')
+    inventory = bundle.get('resource_inventory') or {}
+    observations = (inventory.get('control_observations') or {}).get('rows', [])
+    if not isinstance(observations, list):
+        raise ValueError('Invalid evidence bundle observations')
+    for control, plan in zip(bundle_controls, plans):
+        if plan.get('evidence_refs') != _source_refs(control, observations):
+            raise ValueError('Evidence reference index inconsistent with source bundle')
     controls = result.get('controls')
     if not isinstance(controls, list) or len(controls) != 46:
         raise ValueError('Classification must contain all 46 controls')
@@ -187,7 +206,8 @@ def validate_classification_result(bundle: dict, result: dict) -> dict:
                 or any(not isinstance(x, str) or not x.strip() for x in missing)
                 or not isinstance(rationale, str) or not rationale.strip()):
             raise ValueError(f'Invalid classification fields for #{number}')
-        permitted = {r['id'] for r in plan_lookup[number]['evidence_refs']} | supplemental
+        permitted = {r['id'] for r in plan_lookup[number]['evidence_refs']}
+        permitted.update(ref for ref, scope in supplemental.items() if number in scope)
         if any(ref not in permitted for ref in refs):
             raise ValueError(f'Unrecognized or cross-control evidence reference for #{number}')
         if state == 'EVIDENCE_PENDING':
