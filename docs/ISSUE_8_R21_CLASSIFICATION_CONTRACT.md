@@ -59,10 +59,13 @@ approval to contact AWS from the classifying LLM.
   upload. External input/LLM text remains untrusted.
 
 The original `aws-security-offline-classification-v1` can still be
-read/structurally validated with an explicit
-`r21_request_schema_check=NOT_PERFORMED_LEGACY_V1` response. **It
-is not R21 conformance.** The R21 prompt emits **only v2**;
-for a verifiable R21 workflow, use the v2 output contract.
+read/structurally validated **only against a legacy R20-or-earlier
+evidence bundle that lacks `output_contract`**, with an explicit
+`r21_request_schema_check=NOT_PERFORMED_LEGACY_V1` response.
+A new R21 Web bundle contains the versioned contract and **rejects
+any v1 classification JSON**. Conversely, R20 input rejects v2.
+**Legacy v1 validation is not R21 conformance.** The R21 prompt emits
+**only v2**; never present a legacy CLI exit 0 as R21 success.
 
 ## Important remaining limitations
 
