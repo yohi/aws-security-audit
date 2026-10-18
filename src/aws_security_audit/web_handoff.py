@@ -52,7 +52,8 @@ def build_web_review_bundle(metadata: dict, rows: list[dict], findings: list, in
     # Additive contract. Legacy finding/verdict fields and INVESTIGATION_ONLY
     # declaration are deliberately kept for historical clients.
     decision_support = build_decision_support(
-        controls, resource_inventory or {'resources': [], 'collection_errors': []})
+        controls, resource_inventory or {'resources': [], 'collection_errors': []},
+        r21_contract=True)
     return {
         'schema': 'aws-security-audit-web-review-v1',
         'purpose': 'INVESTIGATION_ONLY',
