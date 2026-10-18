@@ -10,6 +10,7 @@ from collections import Counter
 
 from .catalog import CHECKS
 from .evidence_reconciliation import reconcile_control
+from .shared_evidence import build_cross_control_evidence, build_shared_scope_contract
 
 FINAL_LABELS = frozenset({'対応済み', '未対応', '対応中', '対象外'})
 ROUTES = frozenset({
@@ -115,6 +116,8 @@ def build_decision_support(controls: list[dict], inventory: dict) -> dict:
     rows = (inventory.get('control_observations') or {}).get('rows', [])
     if not isinstance(rows, list):
         raise ValueError('Invalid observation rows')
+    common_scope = build_shared_scope_contract(inventory)
+    cross = build_cross_control_evidence(inventory)
     plans = []
     for control in controls:
         no = control['number']
@@ -130,12 +133,18 @@ def build_decision_support(controls: list[dict], inventory: dict) -> dict:
             'human_context_required_by_criterion': owner_input,
             'evidence_refs': refs,
             'evidence_reconciliation': reconcile_control(no, rows),
+            'shared_scope_requirement_ids': (
+                [common_scope['id']] if no in common_scope['reused_by_controls'] else []),
+            'cross_control_evidence_refs': (
+                cross['references'] if no == 45 else []),
             'observed_attribute_rows': count if type(count) is int and count >= 0 else 0,
             'classification_status': 'NOT_EVALUATED',
             'readiness_caveat': 'Observed attributes do not establish 4-state classification completeness.',
         })
     return {
         'schema': 'aws-security-decision-support-v1',
+        'shared_scope_contract': common_scope,
+        'cross_control_evidence': cross,
         'goal': 'OFFLINE_46_CONTROL_FOUR_STATE_CLASSIFICATION',
         'final_labels': sorted(FINAL_LABELS),
         'temporary_unresolved': 'EVIDENCE_PENDING',
@@ -210,11 +219,22 @@ def validate_classification_result(bundle: dict, result: dict) -> dict:
     observations = (inventory.get('control_observations') or {}).get('rows', [])
     if not isinstance(observations, list):
         raise ValueError('Invalid evidence bundle observations')
+    expected_scope = build_shared_scope_contract(inventory)
+    expected_cross = build_cross_control_evidence(inventory)
+    if (support.get('shared_scope_contract') != expected_scope
+            or support.get('cross_control_evidence') != expected_cross):
+        raise ValueError('Shared scope/cross-control index inconsistent with source bundle')
     for control, plan in zip(bundle_controls, plans):
         if plan.get('evidence_refs') != _source_refs(control, observations):
             raise ValueError('Evidence reference index inconsistent with source bundle')
         if plan.get('evidence_reconciliation') != reconcile_control(control['number'], observations):
             raise ValueError('Evidence reconciliation inconsistent with source bundle')
+        n = control['number']
+        expected_scope_ids = [expected_scope['id']] if n in expected_scope['reused_by_controls'] else []
+        expected_cross_refs = expected_cross['references'] if n == 45 else []
+        if (plan.get('shared_scope_requirement_ids') != expected_scope_ids
+                or plan.get('cross_control_evidence_refs') != expected_cross_refs):
+            raise ValueError('Per-control scope or cross-control references were forged')
     controls = result.get('controls')
     if not isinstance(controls, list) or len(controls) != 46:
         raise ValueError('Classification must contain all 46 controls')
@@ -242,6 +262,7 @@ def validate_classification_result(bundle: dict, result: dict) -> dict:
                 or not isinstance(rationale, str) or not rationale.strip()):
             raise ValueError(f'Invalid classification fields for #{number}')
         permitted = {r['id'] for r in plan_lookup[number]['evidence_refs']}
+        permitted.update(r['id'] for r in plan_lookup[number]['cross_control_evidence_refs'])
         permitted.update(ref for ref, scope in supplemental.items() if number in scope)
         if any(ref not in permitted for ref in refs):
             raise ValueError(f'Unrecognized or cross-control evidence reference for #{number}')
