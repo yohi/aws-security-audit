@@ -35,6 +35,16 @@ evidence acquisition **candidate** for every control:
 - `OWNER_DOCUMENTATION`: inherently organizational runbooks, escalation
   contacts or security responsibilities, which an AWS API cannot prove
 
+Candidate count: 15 AWS-read-only, 24 AWS+Owner scope, 3 non-AWS
+machine exports, 4 Owner documentation. Thus **42/46 should seek
+machine-readable evidence first**, not 42 guaranteed automated decisions.
+Thirty controls can have a criterion-level human-context dependency;
+their *unresolved* questions are grouped into **four conditional request
+batches** (product/network scope; identities/data; logs/monitoring governance;
+incident/recovery ownership). Evidence already available suppresses repeat
+questions; each batch can be answered with existing redacted documents rather
+than interviewing one person per checklist line.
+
 Each row records a preferred evidence request, whether Owner context is
 intrinsic, the existing observation count and stable per-control
 `finding:<No>:<index>`/`observation:<No>:<index>` references.
