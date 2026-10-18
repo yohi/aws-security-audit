@@ -667,6 +667,8 @@ def collect_resource_inventory(ctx, regions, product=None, product_tag=None):
             errors.append(error)
     selected, scope = attribute_resources(inventory, product, product_tag)
     if product is not None:
+        from .ec2_role_route_evidence import collect_selected_instance_network_evidence
+        collect_selected_instance_network_evidence(ctx, selected, errors)
         _collect_selected_s3_access_evidence(ctx, selected, errors)
         cf_list_errors = [
             err for err in errors
