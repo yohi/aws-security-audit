@@ -636,7 +636,16 @@ def collect_resource_inventory(ctx, regions, product=None, product_tag=None):
                 response = api_call(
                     ctx.client_cached('wafv2', 'us-east-1'), 'get_web_acl',
                     ARN=acl_arn, Scope='CLOUDFRONT')
-                attrs['waf_rule_summary'] = web_acl_rule_summary(response.get('WebACL'))
+                acl = response.get('WebACL') if isinstance(response, dict) else None
+                if not isinstance(acl, dict) or acl.get('ARN') != acl_arn:
+                    # Successful transport is not verified WAF evidence.
+                    # Reject absent, malformed or mismatched-identity ACLs.
+                    attrs['waf_rule_lookup'] = 'UNVERIFIED_SCHEMA'
+                    errors.append({'region': 'global', 'service': 'wafv2',
+                                   'operation': 'get_web_acl', 'resource': acl_arn,
+                                   'reason': 'WebACL response lacks the requested ARN'})
+                    continue
+                attrs['waf_rule_summary'] = web_acl_rule_summary(acl)
                 attrs['waf_rule_lookup'] = attrs['waf_rule_summary']['state']
             except EvidenceUnavailable as exc:
                 attrs['waf_rule_lookup'] = 'UNVERIFIED_READ_ERROR'
