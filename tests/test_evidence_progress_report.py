@@ -207,3 +207,39 @@ def test_unverified_r24_api_error_not_miscounted_as_machine_observation():
     )
     assert report['summary']['controls_with_some_machine_evidence_including_supplements'] == 4
     assert report['controls'][7]['r24_evidence'][0]['state'] == 'UNVERIFIED'
+
+
+def test_original_csv_excel_report_relabels_manual_as_scanner_not_human(tmp_path):
+    import csv
+    from zipfile import ZipFile
+    from aws_security_audit.catalog import CHECKS
+    from aws_security_audit.core import Finding
+    from aws_security_audit.report import export_report
+
+    obs = {'rows': [], 'by_control': {str(n): {
+        'ok': (1 if n == 2 else 0),
+        'fail': 0, 'unknown': 0, 'context': 0,
+        'evidence_state': 'PARTIAL_RESOURCE_EVIDENCE' if n == 2
+        else 'NO_RESOURCE_EVIDENCE',
+    } for n in range(1, 47)}}
+    findings = [Finding(c.number, 'MANUAL_REVIEW', 'ap-northeast-1', 'unknown')
+                for c in CHECKS]
+    output = export_report(
+        str(tmp_path), findings, {'timestamp': '2026-10-18T13:00:00+00:00',
+                                  'region_coverage_full': False},
+        resource_inventory={'resources': [], 'control_observations': obs},
+    )
+    j = json.loads(next(p for p in output if p.suffix == '.json').read_text())
+    assert j['summary'][1]['判定'] == 'MANUAL_REVIEW'
+    assert j['summary'][1]['確認済み属性OK'] == 1
+    assert j['summary'][1]['次の証拠取得経路'] == 'AWS_READ_ONLY_CANDIDATE'
+    assert '手動作業件数ではない' in j['summary'][1]['判定の意味']
+    assert '観測あり' in j['summary'][1]['機械観測の状態']
+    assert '観測なし' in j['summary'][0]['機械観測の状態']
+    with next(p for p in output if p.suffix == '.csv').open(
+        encoding='utf-8-sig') as f:
+        csv_rows = list(csv.DictReader(f))
+    assert csv_rows[1]['次の証拠取得経路'] == 'AWS_READ_ONLY_CANDIDATE'
+    with ZipFile(next(p for p in output if p.suffix == '.xlsx')) as z:
+        assert 'スキャナー保留' in z.read('xl/worksheets/sheet1.xml').decode()
+    assert all((p.stat().st_mode & 0o777) == 0o600 for p in output)
