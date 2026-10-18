@@ -212,7 +212,7 @@ WEB_CLASSIFICATION_PROMPT = """# AWS 46項目・4区分 オフライン分類（
 - `final_classification` : 「対応済み」「未対応」「対応中」「対象外」または null
 - `resolution_state` : `FINALIZED` または `EVIDENCE_PENDING`
 - `evidence_refs` : 該当 `decision_support.plans[number].evidence_refs[].id`
-  またはパッケージに明記された `supplemental:<id>` のみ
+  またはパッケージに明記され、当該Noを `control_numbers` に含む `supplemental:<id>` のみ
 - `rationale` : 証拠と不確実性を区別した理由
 - `missing_evidence` : 保留時は具体的な不足証拠を1件以上。確定済みなら []。
 
