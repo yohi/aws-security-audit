@@ -18,7 +18,7 @@ import json
 import os
 from pathlib import Path
 
-from aws_security_audit.core import AuditContext, AuditError
+from aws_security_audit.core import AuditContext, AuditError, ROLE_PATTERN
 from aws_security_audit.r24_targeted_evidence import collect_r24, validate_manifest
 
 
@@ -48,6 +48,9 @@ def main(argv=None):
         return 0
     if not args.source_profile or not args.role_arn or args.out is None:
         parser.error('Live read requires profile, role ARN and private output path')
+    match = ROLE_PATTERN.fullmatch(args.role_arn)
+    if not match or match.group(1) != 'aws' or match.group(2) != manifest['account']:
+        parser.error('Role ARN must match the manifest account before STS initialization')
     out = args.out
     if (out.resolve() == args.manifest.resolve() or out.exists() or out.is_symlink()
             or not out.parent.is_dir()):
