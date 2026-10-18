@@ -238,6 +238,17 @@ def build_product_observations(inventory: dict, regions: list[str]) -> dict:
                     {'lookup': status, 'object_ownership': mode},
                     'Object Ownership is configuration context only; raw grants, '
                     'cross-account permissions and effective public access unverified')
+            if 'access_point_lookup' in attrs:
+                lookup = attrs['access_point_lookup']
+                entries = attrs.get('access_point_evidence')
+                complete = lookup == 'LIST_VERIFIED' and isinstance(entries, list)
+                add(18, r, CONTEXT_ONLY if complete else PROPERTY_UNKNOWN,
+                    'S3 selected bucket access point listing/detail configuration',
+                    {'lookup': lookup, 'bucket_region': attrs.get('access_point_bucket_region'),
+                     'access_points': entries if isinstance(entries, list) else []},
+                    'Only bucket-filtered, regional classic S3 access points; '
+                    'policy contents, MRAP, directory buckets, org controls, '
+                    'cross-account and effective public reachability are not verified')
             versioning = attrs.get('versioning_status')
             lock = attrs.get('object_lock_enabled')
             if versioning == 'Enabled' or lock is True:
@@ -343,6 +354,27 @@ def build_product_observations(inventory: dict, regions: list[str]) -> dict:
                      'standards': source.get('standards', [])},
                     'Hub existence/standards only; CIS controls, findings and ROS linkage unverified')
 
+    # Account-level BPA is shared context, not a product-owned bucket property.
+    account_bpa = inventory.get('shared_s3_account_access_evidence')
+    if isinstance(account_bpa, dict):
+        context = {
+            'service': 's3control', 'resource_type': 'shared-s3-account-control',
+            'region': account_bpa.get('read_region', 'global'),
+            'name': 'S3 account-level BPA',
+            'resource_id': 'account-public-access-block',
+            'arn': '',
+            'attribution': 'SHARED_UNATTRIBUTED',
+            'attribution_evidence': 'Account-wide S3 configuration; not ROS ownership',
+        }
+        flags = account_bpa.get('public_access_block')
+        state = (CONTEXT_ONLY if account_bpa.get('lookup') == 'API_VERIFIED'
+                 and isinstance(flags, dict) else PROPERTY_UNKNOWN)
+        add(18, context, state, 'S3 account-level Block Public Access context',
+            {'lookup': account_bpa.get('lookup'),
+             'public_access_block': flags},
+            'Account-wide effective BPA snapshot; organization policy provenance '
+            'and bucket/access-point effective public reachability are unverified')
+
     summaries = {}
     for definition in CHECKS:
         matching = [r for r in rows if r['number'] == definition.number]
@@ -392,11 +424,22 @@ def build_product_observations(inventory: dict, regions: list[str]) -> dict:
             )
             or (
                 definition.number == 18
-                and err.get('service') == 's3'
-                and err.get('operation') in (
-                    'get_bucket_policy_status', 'get_bucket_ownership_controls'
+                and (
+                    (err.get('service') == 's3'
+                     and err.get('operation') in (
+                         'get_bucket_policy_status', 'get_bucket_ownership_controls',
+                         'get_bucket_location')
+                     and err.get('resource') in s3_access_provenance)
+                    or (err.get('service') == 's3control'
+                        and err.get('operation') in (
+                            'list_access_points', 'get_access_point')
+                        and err.get('resource') in s3_access_provenance)
+                    or (err.get('service') == 's3control'
+                        and err.get('operation') == 'get_public_access_block'
+                        and err.get('resource') == (
+                            inventory.get('shared_s3_account_access_evidence') or {}
+                        ).get('account_id'))
                 )
-                and err.get('resource') in s3_access_provenance
             )
         ]
         summaries[str(definition.number)] = {
