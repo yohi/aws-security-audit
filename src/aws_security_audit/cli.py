@@ -43,6 +43,11 @@ def parser() -> argparse.ArgumentParser:
                              help='Generate a JSON attachment and copy/paste prompt for ChatGPT/Gemini Web; no upload')
             cmd.add_argument('--product', help='Restrict audit evidence to one product using Product/Project/Application/Service tags or Name/ID prefix')
             cmd.add_argument('--product-tag', help='Explicit Key=Value selector (Product, Project, Application, Service or Name); requires --product')
+    offline = sub.add_parser(
+        'validate-classification',
+        help='Validate manually saved LLM 46-control JSON result against an offline evidence bundle; no AWS connection')
+    offline.add_argument('--bundle', required=True, help='Local aws_web_review JSON evidence package')
+    offline.add_argument('--result', required=True, help='Local LLM JSON classification result')
     sub.add_parser('version', help='Show package version')
     return p
 
@@ -274,6 +279,22 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if args.command == 'setup':
             return setup(args)
+        if args.command == 'validate-classification':
+            # Intentionally precedes prepare(): this mode NEVER initializes
+            # AWS sessions, loads AWS credentials or requires a source profile.
+            from .offline_classification import validate_classification_result
+            try:
+                with Path(args.bundle).open(encoding='utf-8') as stream:
+                    bundle = json.load(stream)
+                with Path(args.result).open(encoding='utf-8') as stream:
+                    classification = json.load(stream)
+                checked = validate_classification_result(bundle, classification)
+            except (OSError, ValueError, TypeError, KeyError) as exc:
+                print(f'Classification validation failed: {type(exc).__name__}', file=sys.stderr)
+                return 1
+            print(json.dumps(checked, ensure_ascii=False, sort_keys=True))
+            # A well-formed but unresolved report is incomplete by design.
+            return 2 if checked['pending_count'] else 0
         ctx, regions = prepare(args)
         print(f'Assumed role (STS): {ctx.identity_arn} | source: {ctx.source_profile}', flush=True)
         print('STS session policy: ReadOnlyAccess (role/session-policy intersection; resource-based grants may bypass implicit denial; EFFECTIVE_NO_WRITE=NOT_PROVEN)', flush=True)
