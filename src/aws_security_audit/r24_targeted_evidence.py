@@ -84,10 +84,23 @@ def validate_manifest(data: dict) -> dict:
             raise AuditError('Duplicate ECR image target')
         seen.add(pair)
     for arn in targets['shield_resource_arns']:
-        # Shield protection may be regional or a CloudFront global ARN.
-        prefix = f'arn:aws:'
-        if not arn.startswith(prefix) or f':{account}:' not in arn or not arn.split(':', 5)[-1]:
-            raise AuditError('Shield ARNs must be in the approved AWS account')
+        # Use exact ARN components, not a substring containing the account ID
+        # inside a different account's arbitrary resource suffix.
+        parts = arn.split(':', 5)
+        if (len(parts) != 6 or parts[0:2] != ['arn', 'aws']
+                or parts[4] != account or not parts[5]):
+            raise AuditError('Shield resource ARN must match the approved account')
+        service, resource_region = parts[2:4]
+        if (service == 'cloudfront' and resource_region == ''
+                and parts[5].startswith('distribution/')):
+            continue
+        if (service == 'elasticloadbalancing' and resource_region == region
+                and parts[5].startswith('loadbalancer/')):
+            continue
+        if (service == 'ec2' and resource_region == region
+                and parts[5].startswith('eip-allocation/')):
+            continue
+        raise AuditError('Shield resource type or ARN region is not allowlisted')
     for arn in targets['cloudtrail_trail_arns']:
         if not arn.startswith(f'arn:aws:cloudtrail:{region}:{account}:trail/') or len(arn) > 400:
             raise AuditError('CloudTrail ARNs must match the approved account/region')
