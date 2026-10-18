@@ -11,6 +11,14 @@ _BPA_FLAGS = ('BlockPublicAcls', 'IgnorePublicAcls',
 
 # What belongs to the originally approved control (avoid borrowed criteria).
 _CRITERION_BOUNDARIES = {
+    5: {
+        'not_required_by_original_criterion': [
+            'An observed public egress rule is not in itself proof it is unnecessary for the workload.'
+        ],
+        'remaining_decision_questions': [
+            'Are the observed allow-all outbound rules needed and approved for these DIRECT ROS security groups?'
+        ],
+    },
     17: {
         'not_required_by_original_criterion': [
             'Proving that every historical S3 object is encrypted is not the specified default-encryption criterion.'
@@ -75,7 +83,20 @@ def reconcile_control(number: int, observations: list[dict]) -> dict:
         resource = row.get('resource_id')
         if not isinstance(resource, str) or not resource:
             continue
-        if number == 17:
+        if number == 5:
+            if (prop == 'public ingress and all-protocol public egress'
+                    and state == 'CONTEXT_ONLY'
+                    and row.get('attribution') == 'DIRECT'
+                    and row.get('resource_type') == 'security-group'
+                    and isinstance(value, dict)
+                    and type(value.get('all_protocol_public_egress_rule_count')) is int
+                    and value['all_protocol_public_egress_rule_count'] > 0):
+                findings.append(_fact('DIRECT_SG_ALLOW_ALL_EGRESS_OBSERVED',
+                                      f'DIRECT SG {resource}: '
+                                      f'{value["all_protocol_public_egress_rule_count"]} '
+                                      'allow-all outbound rule(s) observed; business necessity not proven.',
+                                      ref))
+        elif number == 17:
             if (prop == 'default_encryption_algorithms'
                     and state == 'PROPERTY_OK' and row.get('attribution') == 'DIRECT'
                     and isinstance(value, list) and value
