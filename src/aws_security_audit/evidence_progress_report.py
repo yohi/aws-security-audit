@@ -14,6 +14,7 @@ from pathlib import Path
 
 from .offline_classification import CONTROL_EVIDENCE_PLAN, validate_classification_result
 from .report import _private_bytes
+from .shared_evidence import build_cross_control_evidence
 
 MCP_SCHEMA = 'aws-security-mcp-observation-summary-v1'
 PROGRESS_SCHEMA = 'aws-security-evidence-progress-v1'
@@ -130,6 +131,12 @@ def build_evidence_progress(
     raw_obs = (inv.get('control_observations') or {}).get('rows') or []
     if not isinstance(by_control, dict) or not isinstance(raw_obs, list):
         raise ValueError('Invalid observed property evidence')
+    # #20 encrypted automated snapshot observations may also be reused as
+    # #45 backup-existence context; never as evidence of a successful restore.
+    cross = build_cross_control_evidence(inv)
+    cross_by_control = {}
+    for ref in cross['references']:
+        cross_by_control.setdefault(ref['target_control'], []).append(ref)
     rows = []
     for c, p in zip(controls, plans):
         n = c['number']
@@ -158,6 +165,9 @@ def build_evidence_progress(
             evidence_level = 'MACHINE_CONTEXT_OR_UNKNOWN'
         else:
             evidence_level = 'NO_PROPERTY_OBSERVATION'
+        cross_for = cross_by_control.get(n, [])
+        if evidence_level == 'NO_PROPERTY_OBSERVATION' and cross_for:
+            evidence_level = 'CROSS_CONTROL_MACHINE_CONTEXT'
         mcp = mcp_rows.get(n, [])
         r24_for = r24_rows.get(n, [])
         draft = classification['controls'][n - 1] if classification else {}
@@ -176,6 +186,7 @@ def build_evidence_progress(
                 'resource_inventory.control_observations.rows[' + str(x['index']) + ']'
                 for x in source_obs
             ],
+            'cross_control_machine_evidence': cross_for,
             'r24_evidence': r24_for,
             'mcp_summary_observations': mcp,
             'acquisition_route': p['acquisition_route'],
@@ -192,6 +203,7 @@ def build_evidence_progress(
         any(row['property_observation_counts'].values())
         or any(r.get('state') in ('OBSERVED', 'OBSERVED_PARTIAL', 'VERIFIED')
                for r in row['r24_evidence'])
+        or bool(row['cross_control_machine_evidence'])
         or bool(row['mcp_summary_observations'])
         for row in rows
     )
@@ -208,6 +220,8 @@ def build_evidence_progress(
             'scanner_counts': dict(Counter(r['scanner_status'] for r in rows)),
             'original_attribute_observation_rows': len(raw_obs),
             'original_controls_with_property_observations': measured,
+            'cross_control_machine_evidence_refs': len(cross['references']),
+            'controls_with_cross_control_machine_evidence': sorted(cross_by_control),
             'controls_with_some_machine_evidence_including_supplements': with_new,
             'controls_with_no_machine_evidence_including_supplements': 46 - with_new,
             'acquisition_route_counts': dict(Counter(r['acquisition_route'] for r in rows)),
@@ -234,6 +248,7 @@ def build_evidence_progress(
         'limitations': [
             '43 EVIDENCE_PENDING classifications do not mean 43 manual checks.',
             'Machine observations are partial and may include shared/account scope.',
+        'Cross-control automated snapshots establish only existence, never a restore drill or recovery outcome.',
             'A candidate AWS acquisition route is not an executed or approved task.',
             'The Owner documentation route is a planning category, not four completed tasks.',
             'Supplemental MCP summaries are operator-curated, not raw SDK attestations.',
