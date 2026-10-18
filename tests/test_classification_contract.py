@@ -201,6 +201,7 @@ def test_r21_fail_closed_on_schema_provenance_request_contract(fault):
 def test_legacy_v1_is_explicitly_not_r21_conformance():
     bundle, result = _inputs()
     result['schema'] = 'aws-security-offline-classification-v1'
+    bundle['decision_support'].pop('output_contract')
     result.pop('evidence_requests')
     for row in result['controls']:
         row.pop('evidence_claims')
