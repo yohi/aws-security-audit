@@ -18,7 +18,7 @@ SHARED_SCOPE_CONTROLS = frozenset((2, 17, 20, 23))
 
 _OUTPUT_CONTRACT = {
     'schema': 'aws-security-classification-output-contract-v2',
-    'classification_schema': 'aws-security-offline-classification-v1',
+    'classification_schema': 'aws-security-offline-classification-v2',
     'label_count_location': 'summary.<one_of_the_four_Japanese_labels>',
     'nested_classifications_counts_allowed': False,
     'requires': [
