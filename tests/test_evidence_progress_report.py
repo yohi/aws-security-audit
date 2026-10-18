@@ -243,3 +243,41 @@ def test_original_csv_excel_report_relabels_manual_as_scanner_not_human(tmp_path
     with ZipFile(next(p for p in output if p.suffix == '.xlsx')) as z:
         assert 'スキャナー保留' in z.read('xl/worksheets/sheet1.xml').decode()
     assert all((p.stat().st_mode & 0o777) == 0o600 for p in output)
+
+
+
+def test_verified_automated_snapshot_reused_for_45_without_restore_claim():
+    evidence = source()
+    evidence['resource_inventory']['resources'] = [{
+        'resource_id': 'snap-ros-automated',
+        'resource_type': 'db-cluster-snapshot',
+        'attribution': 'DIRECT',
+        'attributes': {'snapshot_type': 'automated'},
+    }]
+    evidence['resource_inventory']['control_observations']['rows'].append({
+        'number': 20,
+        'property_result': 'PROPERTY_OK',
+        'resource_id': 'snap-ros-automated',
+        'resource_type': 'db-cluster-snapshot',
+        'attribution': 'DIRECT',
+        'property': 'effective storage encryption',
+        'observed_value': {
+            'encrypted': True,
+            'encryption_state': 'ENCRYPTED',
+            'storage_encryption_type': 'sse-kms',
+        },
+    })
+    evidence['resource_inventory']['control_observations']['by_control']['20']['ok'] = 1
+    report = build_evidence_progress(evidence)
+    assert report['summary']['original_controls_with_property_observations'] == 5
+    assert report['summary']['cross_control_machine_evidence_refs'] == 1
+    assert report['summary']['controls_with_cross_control_machine_evidence'] == [45]
+    assert report['summary']['controls_with_some_machine_evidence_including_supplements'] == 6
+    row = report['controls'][44]
+    assert row['number'] == 45
+    assert row['scanner_status'] == 'MANUAL_REVIEW'
+    assert row['business_resolution_state'] == 'NOT_EVALUATED'
+    assert row['machine_evidence_level'] == 'CROSS_CONTROL_MACHINE_CONTEXT'
+    assert row['cross_control_machine_evidence'][0]['fact_type'] == 'AUTOMATED_RDS_SNAPSHOT_EXISTS'
+    assert 'successful restore drill' in row['cross_control_machine_evidence'][0]['does_not_prove']
+    assert row['owner_adoption_verified'] is False
