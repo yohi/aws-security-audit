@@ -163,7 +163,7 @@ WEB_REVIEW_PROMPT = """あなたはAWSセキュリティ監査の独立した調
 
 # New primary prompt for manual ChatGPT/Gemini Web uploads.
 # Preserve WEB_REVIEW_PROMPT unchanged for older investigation-only consumers.
-WEB_CLASSIFICATION_PROMPT = """# AWS 46項目・4区分 オフライン分類（R18）
+WEB_CLASSIFICATION_PROMPT = """# AWS 46項目・4区分 オフライン分類（R19：取得済み証拠照合）
 
 あなたは **添付された aws_web_review_*.json だけ**を根拠として46項目を評価する
 証拠評価LLMです。必要に応じて人間が別途アップロードした証拠文書も使用できますが、
@@ -196,15 +196,40 @@ WEB_CLASSIFICATION_PROMPT = """# AWS 46項目・4区分 オフライン分類（
 未確認・MANUAL_REVIEW＝対応中、とはしないでください。
 
 ## 手動チェックを最小にする順序
+0. 46項目の「推奨設定・確認基準」を唯一の必須判定基準とし、
+   他項目の要件を上乗せしないでください。リソースの役割・対象範囲が
+   不明なときだけ該当する不足情報を明示してください。
 1. `decision_support.plans` を参照し、まずすでにパッケージにある証拠を再利用します。
-2. 各項目の `evidence_refs` を確認し、AWS設定で決着できる問題は
-   人間による個別判定ではなく **オフライン証拠で** 評価します。
+   特に `evidence_reconciliation.verified_facts` の**実際に取得された設定値**を先に読み、
+   `remaining_decision_questions` と `not_required_by_original_criterion` を確認します。
+   `preferred_evidence_request` は**取得候補の静的な例**であって
+   実際の未取得項目一覧ではありません。そのまま `missing_evidence` にコピーしてはいけません。
+   取得済みを「未検証」と書かず、「設定なし」と「取得失敗」を区別します。
+2. 参照可能なID一覧から、**主張に直接関係する少数の証拠IDだけ**を選びます。
+   全IDを機械的にコピーしただけでは証拠評価になりません。
+   `resource_inventory.control_observations.rows` の構造化値を確かめ、
+   古い `interpretation` の一般的な未検証警告が新しい観測値と食い違う場合は
+   **取得済み事実を優先**し、当該観測が証明しない範囲だけを保留します。
+   AWS設定で決着できる問題は、人間による個別判定でなくオフライン証拠で評価します。
 3. まだ足りない情報は、APIから自動取得できる候補、他システムの自動エクスポート候補、
    人間しか確認できないポリシー・業務・責任境界に分けます。
    decision_support.conditional_human_review_batches は**未解決の場合のみ**使います。
    同じ人間に同じ内容を何度も質問せず、4つの論点別バッチで可能な限り統合し、
    既存の提出証拠で解消した質問は出しません。
-4. 46行すべてを出力します。最終確定はOwner確認に委ねます。
+4. 特に以下の判定範囲を混同しないでください。
+   - #17：元の基準はS3**バケットのデフォルト暗号化**。過去の全オブジェクト暗号化は別の論点。
+   - #18：アカウントBPAの `NOT_CONFIGURED` は**取得済みの非設定結果**であり未取得ではない。
+     選択済み2バケットの通常Access Point一覧は `LIST_VERIFIED` で0件、
+     バケットBPAは4項目すべてtrueが観測済み。
+     ただしアカウントBPAとバケットBPAの適用義務、他経路、組織由来、実効公開可否は別に判断。
+   - #20：RDSストレージと自動スナップショットの**暗号化**が基準。
+     リストア訓練の実績は#45へ分離し、#20の必須証拠にしない。
+   - #23：Aurora**クラスターの削除保護**を評価し、
+     メンバーインスタンスの可用性問題は削除保護の基準に上乗せしない。
+5. #16、#19、#22など設定不備の直接観測と「対応中」かどうかの証明を区別します。
+   是正進行の文書がまだ提供されていないことは**是正していないことの証明ではありません**。
+   技術的な負の証拠は記録し、ビジネス分類の最終承認はOwnerに委ねます。
+6. 46行すべてを出力します。最終確定はOwner確認に委ねます。
 
 ## 出力フォーマット（JSONのみ）
 `schema` は `aws-security-offline-classification-v1`。
@@ -213,8 +238,9 @@ WEB_CLASSIFICATION_PROMPT = """# AWS 46項目・4区分 オフライン分類（
 - `number` : 1〜46
 - `final_classification` : 「対応済み」「未対応」「対応中」「対象外」または null
 - `resolution_state` : `FINALIZED` または `EVIDENCE_PENDING`
-- `evidence_refs` : 該当 `decision_support.plans[number].evidence_refs[].id`
-  またはパッケージに明記され、当該Noを `control_numbers` に含む `supplemental:<id>` のみ
+- `evidence_refs` : 根拠として**実際に用いた** `decision_support.plans[number].evidence_refs[].id`
+  またはパッケージに明記され、当該Noを `control_numbers` に含む `supplemental:<id>` のみ。
+  参照可能なIDを全件転記せず、主張を支えるものだけを選ぶこと
 - `rationale` : 証拠と不確実性を区別した理由
 - `missing_evidence` : 保留時は具体的な不足証拠を1件以上。確定済みなら []。
 
