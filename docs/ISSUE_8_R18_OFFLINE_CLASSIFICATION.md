@@ -64,7 +64,8 @@ Owner adoption by reading JSON alone.
   classified (Owner semantic review still required); exit 2: pending rows;
   exit 1: malformed input/citation/summary. It never prints raw input data.
 - Optional operator-added `supplemental_evidence` records must have
-  `id`, nonblank `source`, nonblank `collected_at`; such metadata
+  `id`, nonblank `source`, nonblank `collected_at`, and explicit
+  `control_numbers` limited to No.1–46; such metadata
   cannot on its own prove a document was inspected or its contents are true.
   Supporting documents must be **actually attached and reviewed** by LLM.
 - No new collector AWS API, AWS policy, IAM, deployment changes.
