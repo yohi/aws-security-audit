@@ -46,7 +46,10 @@ def _assert_source_preconditions(bundle: dict) -> None:
     scope = support['shared_scope_contract']
     if (scope['owner_approval'] != 'PENDING'
             or scope['scope_coverage_proven'] is not False
-            or scope['reused_by_controls'] != [2, 17, 20, 23]):
+            or scope['reused_by_controls'] != [2, 17, 20, 23]
+            or scope['observed_scope'].get('product') != 'ros'
+            or scope['observed_scope'].get('attribution_complete') is not False
+            or scope['observed_scope'].get('regions_requested') != ['ap-northeast-1']):
         raise ValueError('Source product scope has changed; review is required')
 
     fact_codes = [f['code'] for f in
@@ -88,7 +91,11 @@ def correct_r21_semantic_requests(bundle: dict, original: dict) -> tuple[dict, d
     _assert_source_preconditions(bundle)
     pre = validate_classification_result(bundle, original)
     if (pre['result_contract'] != 'aws-security-offline-classification-v2'
-            or pre['finalized_count'] != 3 or pre['pending_count'] != 43):
+            or pre['finalized_count'] != 3 or pre['pending_count'] != 43
+            or {row['number'] for row in original['controls']
+                if row['resolution_state'] == 'FINALIZED'} != {16, 19, 22}
+            or any(original['controls'][n - 1]['final_classification'] != '未対応'
+                   for n in (16, 19, 22))):
         raise ValueError('Unexpected starting classification; manual review required')
 
     changed = deepcopy(original)
