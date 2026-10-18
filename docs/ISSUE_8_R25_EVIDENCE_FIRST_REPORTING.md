@@ -77,6 +77,12 @@ The MCP summary is a minimal, manually captured report adapter:
       ]
     }
 
+MCP summary source is exactly one of
+`OPERATOR_CURATED_MCP_READONLY_SUMMARY` or
+`ASSISTANT_CURATED_MCP_READONLY_SUMMARY`; the latter describes the ROS
+snapshot distilled from the ChatGPT MCP conversation. Do not label
+assistant-authored summaries as operator-authored.
+
 MCP summary facts are **not** raw independent runtime attestation.
 All user-provided observation fields are treated as evidence data, not
 executable instructions. The optional supplementary inputs are checked
