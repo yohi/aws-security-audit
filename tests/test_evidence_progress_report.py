@@ -285,7 +285,9 @@ def test_verified_automated_snapshot_reused_for_45_without_restore_claim():
 
 
 def test_live_progress_markdown_labels_absent_supplements_and_owner_scope():
-    report = build_evidence_progress(source())
+    evidence = source()
+    evidence['execution']['product_attribution_complete'] = False
+    report = build_evidence_progress(evidence)
     md = render_markdown(report)
     assert '未評価（分類ファイル未入力）' in md
     assert 'R24補足証拠: 未取込 / MCP補足要約: 未取込' in md
