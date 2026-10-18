@@ -147,6 +147,7 @@ def test_explicit_supplemental_document_reference_is_allowed_structurally():
         'id': 'owner-runbook-42',
         'source': 'manual-uploaded-and-reviewed-runbook.txt',
         'collected_at': '2026-10-18T05:50:00+00:00',
+        'control_numbers': [42],
     }]
     result = _response(bundle)
     row = result['controls'][41]
