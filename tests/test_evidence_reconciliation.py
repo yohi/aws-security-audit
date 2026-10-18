@@ -172,4 +172,4 @@ def test_r19_citation_all_sources_is_warning_not_false_semantic_pass():
     }, result)
     assert verified['structure_and_reference_check'] == 'PASS'
     assert verified['semantic_compliance_verified'] is False
-    assert {w['number'] for w in verified['citation_quality_warnings']} == {17, 18, 20}
+    assert {w['number'] for w in verified['citation_quality_warnings']} == {17, 18, 20, 23}
