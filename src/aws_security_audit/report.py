@@ -52,12 +52,26 @@ def overall_rows(results: list[Finding], *, coverage_full: bool = False,
         })
 
     if observations is not None:
+        from .offline_classification import CONTROL_EVIDENCE_PLAN
         for row in output:
             stats = observations.get('by_control', {}).get(str(row['No']), {})
             row['確認済み属性OK'] = stats.get('ok', 0)
             row['確認済み属性NG'] = stats.get('fail', 0)
             row['属性未確認・参考'] = stats.get('unknown', 0) + stats.get('context', 0)
             row['属性証拠カバレッジ'] = stats.get('evidence_state', 'NO_RESOURCE_EVIDENCE')
+            # The scanner status is immutable; these additive columns explain
+            # actual machine evidence without implying 43 human tasks or PASS.
+            row['判定の意味'] = (
+                'スキャナー保留（手動作業件数ではない）'
+                if row['判定'] == 'MANUAL_REVIEW'
+                else 'スキャナーの技術判定（Owner最終分類ではない）'
+            )
+            row['機械観測の状態'] = (
+                '対象属性の観測あり（プロダクト全体の適合とは別）'
+                if sum(stats.get(k, 0) for k in ('ok', 'fail', 'unknown', 'context'))
+                else '対象属性の機械観測なし（手動作業確定ではない）'
+            )
+            row['次の証拠取得経路'] = CONTROL_EVIDENCE_PLAN[row['No']][0]
     return output
 
 
@@ -105,7 +119,7 @@ def _excel_bytes(rows: list[dict], details: list[dict], meta: dict,
     summary_keys = list(rows[0])
     detail_keys = ['No', 'scope', 'status', 'detail', 'evidence']
     tables = [
-        ([summary_keys] + [[str(x.get(k, '')) for k in summary_keys] for x in rows], [8, 22, 32, 65, 12, 46, 19, 19, 24, 65, 32, 75, 17, 17, 18, 30][:len(summary_keys)]),
+        ([summary_keys] + [[str(x.get(k, '')) for k in summary_keys] for x in rows], [8, 22, 32, 65, 12, 46, 19, 19, 24, 65, 32, 75, 17, 17, 18, 30, 45, 56, 30][:len(summary_keys)]),
         ([detail_keys] + [[str(d.get(k, '')) for k in detail_keys] for d in details], [8, 25, 19, 65, 78]),
         ([['項目', '値']] + [[k, str(v)] for k, v in meta.items()], [28, 100]),
     ]
