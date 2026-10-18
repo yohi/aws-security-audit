@@ -9,6 +9,7 @@ from __future__ import annotations
 from collections import Counter
 
 from .catalog import CHECKS
+from .evidence_reconciliation import reconcile_control
 
 FINAL_LABELS = frozenset({'対応済み', '未対応', '対応中', '対象外'})
 ROUTES = frozenset({
@@ -128,6 +129,7 @@ def build_decision_support(controls: list[dict], inventory: dict) -> dict:
             'preferred_evidence_request': needed,
             'human_context_required_by_criterion': owner_input,
             'evidence_refs': refs,
+            'evidence_reconciliation': reconcile_control(no, rows),
             'observed_attribute_rows': count if type(count) is int and count >= 0 else 0,
             'classification_status': 'NOT_EVALUATED',
             'readiness_caveat': 'Observed attributes do not establish 4-state classification completeness.',
@@ -211,6 +213,8 @@ def validate_classification_result(bundle: dict, result: dict) -> dict:
     for control, plan in zip(bundle_controls, plans):
         if plan.get('evidence_refs') != _source_refs(control, observations):
             raise ValueError('Evidence reference index inconsistent with source bundle')
+        if plan.get('evidence_reconciliation') != reconcile_control(control['number'], observations):
+            raise ValueError('Evidence reconciliation inconsistent with source bundle')
     controls = result.get('controls')
     if not isinstance(controls, list) or len(controls) != 46:
         raise ValueError('Classification must contain all 46 controls')
@@ -221,6 +225,7 @@ def validate_classification_result(bundle: dict, result: dict) -> dict:
     plan_lookup = {p['number']: p for p in plans}
     supplemental = _supplemental_ids(bundle)
     counts = Counter()
+    advisory_warnings = []
     for row in controls:
         number = row['number']
         state = row.get('resolution_state')
@@ -240,6 +245,13 @@ def validate_classification_result(bundle: dict, result: dict) -> dict:
         permitted.update(ref for ref, scope in supplemental.items() if number in scope)
         if any(ref not in permitted for ref in refs):
             raise ValueError(f'Unrecognized or cross-control evidence reference for #{number}')
+        source_refs = {r['id'] for r in plan_lookup[number]['evidence_refs']}
+        if len(source_refs) > 2 and set(refs) == source_refs:
+            advisory_warnings.append({
+                'number': number,
+                'code': 'ALL_SOURCE_REFS_CITED_UNSELECTIVELY',
+                'detail': 'Every supplied source reference was cited; manually verify claim-level relevance.',
+            })
         if state == 'EVIDENCE_PENDING':
             if label is not None or not missing:
                 raise ValueError(f'Pending #{number} requires null classification and missing evidence')
@@ -266,5 +278,6 @@ def validate_classification_result(bundle: dict, result: dict) -> dict:
         'finalized_count': counts['finalized'],
         'pending_count': counts['pending'],
         'counts': {label: counts[label] for label in sorted(FINAL_LABELS)},
+        'citation_quality_warnings': advisory_warnings,
         'status': 'INCOMPLETE' if counts['pending'] else 'ALL_ROWS_CLASSIFIED_OWNER_REVIEW_PENDING',
     }
