@@ -184,3 +184,26 @@ def test_classification_is_structurally_validated_before_use(monkeypatch):
     monkeypatch.setattr(mod, 'validate_classification_result', invalid)
     with pytest.raises(ValueError, match='invalid classification'):
         build_evidence_progress(source(), classification={'controls': []})
+
+
+def test_assistant_curated_mcp_source_is_explicit_and_unattested():
+    data = mcp()
+    data['source'] = 'ASSISTANT_CURATED_MCP_READONLY_SUMMARY'
+    report = build_evidence_progress(
+        source(), mcp_summary=data, expected_account='123456789012',
+    )
+    assert report['source_validation']['mcp_summary_source'] == data['source']
+    assert report['source_validation']['mcp_summary_independent_runtime_attestation'] is False
+
+
+def test_unverified_r24_api_error_not_miscounted_as_machine_observation():
+    r24 = {
+        'schema': 'aws-ros-r24-targeted-evidence-v1',
+        'product': 'ros', 'account': '123456789012', 'region': 'ap-northeast-1',
+        'control_8_shield': {'state': 'UNVERIFIED'},
+    }
+    report = build_evidence_progress(
+        source(), r24=r24, expected_account='123456789012',
+    )
+    assert report['summary']['controls_with_some_machine_evidence_including_supplements'] == 4
+    assert report['controls'][7]['r24_evidence'][0]['state'] == 'UNVERIFIED'
