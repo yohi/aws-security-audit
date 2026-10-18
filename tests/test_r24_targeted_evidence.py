@@ -270,7 +270,12 @@ def test_shield_substring_account_bypass_and_cross_region_refused():
 
 def test_operator_script_preview_never_initializes_credentials(tmp_path, monkeypatch, capsys):
     import json
-    import scripts.r24_targeted_read_only as script
+    import importlib.util
+    from pathlib import Path
+    script_path = Path(__file__).resolve().parents[1] / 'scripts' / 'r24_targeted_read_only.py'
+    spec = importlib.util.spec_from_file_location('r24_operator_script_test', script_path)
+    script = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(script)
     path = tmp_path / 'scope.json'
     path.write_text(json.dumps(manifest()))
     monkeypatch.setattr(script, 'AuditContext',
@@ -282,7 +287,12 @@ def test_operator_script_preview_never_initializes_credentials(tmp_path, monkeyp
 
 def test_operator_script_wrong_role_account_before_sts(tmp_path, monkeypatch):
     import json
-    import scripts.r24_targeted_read_only as script
+    import importlib.util
+    from pathlib import Path
+    script_path = Path(__file__).resolve().parents[1] / 'scripts' / 'r24_targeted_read_only.py'
+    spec = importlib.util.spec_from_file_location('r24_operator_script_test', script_path)
+    script = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(script)
     path = tmp_path / 'scope.json'
     path.write_text(json.dumps(manifest()))
     monkeypatch.setattr(script, 'AuditContext',
