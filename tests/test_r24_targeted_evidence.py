@@ -199,6 +199,79 @@ def test_shield_only_returns_requested_resource_protection(monkeypatch):
     assert out['state'] == 'OBSERVED_PARTIAL'
 
 
+
+
+def test_shield_two_targets_use_separate_single_arn_filters(monkeypatch):
+    """Shield InclusionFilters.ResourceArns has max one element per request."""
+    first = f'arn:aws:elasticloadbalancing:{_REGION}:{_ACCOUNT}:loadbalancer/app/ros-a/aaa'
+    second = f'arn:aws:elasticloadbalancing:{_REGION}:{_ACCOUNT}:loadbalancer/app/ros-b/bbb'
+    filters = []
+
+    def api(client, op, **kwargs):
+        assert (client, op, kwargs) == ('shield', 'describe_subscription', {})
+        return {'Subscription': {'SubscriptionLimits': []}}
+
+    def fake_paged(client, op, key, **kwargs):
+        assert (client, op, key) == ('shield', 'list_protections', 'Protections')
+        arns = kwargs['InclusionFilters']['ResourceArns']
+        assert len(arns) == 1
+        filters.append(arns[0])
+        return ([{'ResourceArn': first, 'Id': 'first-protection'}]
+                if arns[0] == first else [])
+
+    monkeypatch.setattr(r24, 'api_call', api)
+    monkeypatch.setattr(r24, 'paged', fake_paged)
+    result = r24._shield(FakeCtx(), _REGION, [first, second])
+    assert filters == [first, second]
+    assert result['state'] == 'OBSERVED_PARTIAL'
+    assert result['subscription_observed'] is True
+    assert result['resources'] == [
+        {'resource_arn': first, 'protection_listed': True,
+         'protection_id': 'first-protection'},
+        {'resource_arn': second, 'protection_listed': False,
+         'protection_id': None},
+    ]
+
+
+def test_shield_subscription_not_found_and_partial_list_errors_stay_unknown(monkeypatch):
+    first = f'arn:aws:elasticloadbalancing:{_REGION}:{_ACCOUNT}:loadbalancer/app/ros-a/aaa'
+    second = f'arn:aws:elasticloadbalancing:{_REGION}:{_ACCOUNT}:loadbalancer/app/ros-b/bbb'
+
+    def api(client, op, **kwargs):
+        raise EvidenceUnavailable('shield.describe_subscription: ResourceNotFoundException')
+
+    def fake_paged(client, op, key, **kwargs):
+        arn = kwargs['InclusionFilters']['ResourceArns'][0]
+        if arn == second:
+            raise EvidenceUnavailable('shield.list_protections: ValidationException')
+        return [{'ResourceArn': first, 'Id': 'one-known-protection'}]
+
+    monkeypatch.setattr(r24, 'api_call', api)
+    monkeypatch.setattr(r24, 'paged', fake_paged)
+    result = r24._shield(FakeCtx(), _REGION, [first, second])
+    assert result['state'] == 'UNVERIFIED'
+    assert result['subscription'] == 'UNVERIFIED'
+    assert result['subscription_observed'] is False
+    assert result['list'] == 'UNVERIFIED'
+    assert len(result['errors']) == 2
+    assert result['resources'][0]['protection_listed'] is True
+    assert result['resources'][1]['protection_listed'] is None
+    assert result['resources'][1]['list_state'] == 'UNVERIFIED'
+    assert 'error_code' in result['resources'][1]
+
+
+def test_shield_single_failure_never_becomes_unprotected(monkeypatch):
+    target = f'arn:aws:elasticloadbalancing:{_REGION}:{_ACCOUNT}:loadbalancer/app/ros/abc'
+    monkeypatch.setattr(
+        r24, 'api_call', lambda *a, **k: {'Subscription': {}},
+    )
+    def refuse(*args, **kwargs):
+        raise EvidenceUnavailable('shield.list_protections: ValidationException')
+    monkeypatch.setattr(r24, 'paged', refuse)
+    result = r24._shield(FakeCtx(), _REGION, [target])
+    assert result['state'] == 'UNVERIFIED'
+    assert result['resources'][0]['protection_listed'] is None
+
 def test_inspector_and_ecr_queries_are_bound_to_explicit_targets(monkeypatch):
     seen = []
     ident = 'i-0123456789abcdef0'

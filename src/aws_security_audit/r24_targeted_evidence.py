@@ -132,27 +132,61 @@ def _safe_attempt(ctx, service, region, operation, *, paged_field=None, **kwargs
 
 
 def _shield(ctx, region, resource_arns):
+    """AWS Shield ListProtections permits exactly one ResourceArn per filter.
+
+    Preserve the result of each explicitly selected resource independently:
+    one bad API response must not turn other resources into false negatives.
+    Subscription errors remain UNVERIFIED, never INACTIVE.
+    """
     if not resource_arns:
         return {'state': 'NOT_REQUESTED'}
     sub = _safe_attempt(ctx, 'shield', 'us-east-1', 'describe_subscription')
-    lst = _safe_attempt(ctx, 'shield', 'us-east-1', 'list_protections',
-                        paged_field='Protections',
-                        InclusionFilters={'ResourceArns': resource_arns})
-    if sub['state'] != 'OBSERVED' or lst['state'] != 'OBSERVED':
-        return {'state': 'UNVERIFIED',
-                'subscription': sub['state'],
-                'list': lst['state'],
-                'errors': [x.get('error_code') for x in (sub, lst)
-                           if x['state'] == 'UNVERIFIED']}
-    actual = {r.get('ResourceArn'): r for r in lst['data']
-              if isinstance(r, dict) and r.get('ResourceArn') in resource_arns}
-    return {'state': 'OBSERVED_PARTIAL',
-            'subscription_observed': isinstance(sub['data'].get('Subscription'), dict),
-            'resources': [{
-                'resource_arn': arn, 'protection_listed': arn in actual,
-                'protection_id': actual.get(arn, {}).get('Id'),
-            } for arn in resource_arns],
-            'limitation': 'Listed protections do not establish full product or org scope.'}
+    rows = []
+    list_errors = []
+    for arn in resource_arns:
+        result = _safe_attempt(
+            ctx, 'shield', 'us-east-1', 'list_protections',
+            paged_field='Protections',
+            InclusionFilters={'ResourceArns': [arn]},
+        )
+        if result['state'] != 'OBSERVED':
+            code = result.get('error_code')
+            list_errors.append(code)
+            rows.append({
+                'resource_arn': arn, 'protection_listed': None,
+                'protection_id': None, 'list_state': 'UNVERIFIED',
+                'error_code': code,
+            })
+            continue
+        actual = next(
+            (r for r in result['data'] if isinstance(r, dict)
+             and r.get('ResourceArn') == arn), None,
+        )
+        rows.append({
+            'resource_arn': arn,
+            'protection_listed': actual is not None,
+            'protection_id': actual.get('Id') if actual else None,
+        })
+    sub_verified = (
+        sub['state'] == 'OBSERVED'
+        and isinstance(sub['data'].get('Subscription'), dict)
+    )
+    errors = ([sub.get('error_code')] if sub['state'] == 'UNVERIFIED'
+              else []) + list_errors
+    return {
+        'state': ('OBSERVED_PARTIAL' if sub_verified and not list_errors
+                  else 'UNVERIFIED'),
+        'subscription': sub['state'],
+        'subscription_observed': sub_verified,
+        'list': 'OBSERVED' if not list_errors else 'UNVERIFIED',
+        'errors': errors,
+        'resources': rows,
+        'limitation': (
+            'Per-resource ListProtections observations do not establish '
+            'active subscription, complete ROS/organization coverage, or '
+            'Owner-adopted compliance. An API error is never a negative finding.'
+        ),
+    }
 
 
 def _trail(ctx, region, trails, bucket_arns):
