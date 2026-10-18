@@ -251,3 +251,49 @@ def test_source_status_not_overwritten_by_empty_source(monkeypatch):
     assert result['control_27_flow_logs']['state'] == 'OBSERVED_PARTIAL'
     assert result['control_27_flow_logs']['network_interfaces'][0]['flow_logs'] == []
     assert result['control_27_flow_logs']['network_interfaces'][0]['effective_coverage'] == 'NOT_PROVEN'
+
+
+def test_shield_substring_account_bypass_and_cross_region_refused():
+    x = manifest()
+    x['targets']['shield_resource_arns'] = [
+        'arn:aws:elasticloadbalancing:ap-northeast-1:999999999999:'
+        'loadbalancer/app/123456789012:escaped'
+    ]
+    with pytest.raises(AuditError, match='approved account'):
+        r24.validate_manifest(x)
+    x['targets']['shield_resource_arns'] = [
+        f'arn:aws:elasticloadbalancing:us-east-1:{_ACCOUNT}:loadbalancer/app/other/a'
+    ]
+    with pytest.raises(AuditError, match='not allowlisted'):
+        r24.validate_manifest(x)
+
+
+def test_operator_script_preview_never_initializes_credentials(tmp_path, monkeypatch, capsys):
+    import json
+    import scripts.r24_targeted_read_only as script
+    path = tmp_path / 'scope.json'
+    path.write_text(json.dumps(manifest()))
+    monkeypatch.setattr(script, 'AuditContext',
+                        lambda *args: (_ for _ in ()).throw(
+                            AssertionError('unexpected AWS connection')))
+    assert script.main(['--manifest', str(path)]) == 0
+    assert 'PREVIEW_ONLY_NO_AWS' in capsys.readouterr().out
+
+
+def test_operator_script_wrong_role_account_before_sts(tmp_path, monkeypatch):
+    import json
+    import scripts.r24_targeted_read_only as script
+    path = tmp_path / 'scope.json'
+    path.write_text(json.dumps(manifest()))
+    monkeypatch.setattr(script, 'AuditContext',
+                        lambda *args: (_ for _ in ()).throw(
+                            AssertionError('unexpected AWS connection')))
+    with pytest.raises(SystemExit) as exc:
+        script.main([
+            '--manifest', str(path), '--execute-approved-read',
+            '--source-profile', 'source',
+            '--role-arn', 'arn:aws:iam::999999999999:role/AnotherRole',
+            '--out', str(tmp_path / 'private.json'),
+        ])
+    assert exc.value.code == 2
+    assert not (tmp_path / 'private.json').exists()
