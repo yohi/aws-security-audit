@@ -72,7 +72,18 @@ def test_every_control_has_distinct_route_and_actionable_evidence_request():
     assert support['manual_checks_minimization'] == (
         'AUTO_EVIDENCE_FIRST_THEN_ONLY_BLOCKING_OWNER_INPUT')
     assert len(support['plans']) == 46
-    assert sum(support['counts_by_acquisition_route'].values()) == 46
+    assert support['counts_by_acquisition_route'] == {
+        'AWS_PLUS_OWNER_SCOPE': 24,
+        'AWS_READ_ONLY_CANDIDATE': 15,
+        'NON_AWS_EXPORT_CANDIDATE': 3,
+        'OWNER_DOCUMENTATION': 4,
+    }
+    assert len(support['machine_evidence_first']) == 42
+    batches = support['conditional_human_review_batches']
+    assert len(batches) == 4
+    all_human = [n for block in batches for n in block['control_numbers']]
+    assert len(all_human) == len(set(all_human)) == 30
+    assert all(block['request_only_if_unresolved'] for block in batches)
     assert [p['number'] for p in support['plans']] == list(range(1, 47))
     assert all(p['preferred_evidence_request'] for p in support['plans'])
     assert support['plans'][15]['evidence_refs'][-1]['id'] == 'observation:16:0'
