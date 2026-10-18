@@ -163,7 +163,7 @@ WEB_REVIEW_PROMPT = """あなたはAWSセキュリティ監査の独立した調
 
 # New primary prompt for manual ChatGPT/Gemini Web uploads.
 # Preserve WEB_REVIEW_PROMPT unchanged for older investigation-only consumers.
-WEB_CLASSIFICATION_PROMPT = """# AWS 46項目・4区分 オフライン分類（R19：取得済み証拠照合）
+WEB_CLASSIFICATION_PROMPT = """# AWS 46項目・4区分 オフライン分類（R20：共通スコープ・証拠再利用）
 
 あなたは **添付された aws_web_review_*.json だけ**を根拠として46項目を評価する
 証拠評価LLMです。必要に応じて人間が別途アップロードした証拠文書も使用できますが、
@@ -205,6 +205,11 @@ WEB_CLASSIFICATION_PROMPT = """# AWS 46項目・4区分 オフライン分類（
    `preferred_evidence_request` は**取得候補の静的な例**であって
    実際の未取得項目一覧ではありません。そのまま `missing_evidence` にコピーしてはいけません。
    取得済みを「未検証」と書かず、「設定なし」と「取得失敗」を区別します。
+   `decision_support.shared_scope_contract` は#2/#17/#20/#23に共有される
+   **一回だけの対象資産・リージョン確認要求**です。
+   現状の `owner_approval=PENDING` を承認済みと誤読せず、
+   同じ承認証跡を4項目に分けて重複要求しないでください。
+   共通対象範囲が未承認でも、それぞれの実測済み属性は評価します。
 2. 参照可能なID一覧から、**主張に直接関係する少数の証拠IDだけ**を選びます。
    全IDを機械的にコピーしただけでは証拠評価になりません。
    `resource_inventory.control_observations.rows` の構造化値を確かめ、
@@ -217,6 +222,10 @@ WEB_CLASSIFICATION_PROMPT = """# AWS 46項目・4区分 オフライン分類（
    同じ人間に同じ内容を何度も質問せず、4つの論点別バッチで可能な限り統合し、
    既存の提出証拠で解消した質問は出しません。
 4. 特に以下の判定範囲を混同しないでください。
+   - #5：元の基準には**不要なアウトバウンド**も含まれます。
+     `evidence_reconciliation.verified_facts` のDIRECT SG全許可egressを
+     インバウンド評価とともに報告し、業務上の必要性が不明なら保留します。
+     全許可＝自動的に「未対応」とは決めません。
    - #17：元の基準はS3**バケットのデフォルト暗号化**。過去の全オブジェクト暗号化は別の論点。
    - #18：アカウントBPAの `NOT_CONFIGURED` は**取得済みの非設定結果**であり未取得ではない。
      選択済み2バケットの通常Access Point一覧は `LIST_VERIFIED` で0件、
@@ -226,6 +235,12 @@ WEB_CLASSIFICATION_PROMPT = """# AWS 46項目・4区分 オフライン分類（
      リストア訓練の実績は#45へ分離し、#20の必須証拠にしない。
    - #23：Aurora**クラスターの削除保護**を評価し、
      メンバーインスタンスの可用性問題は削除保護の基準に上乗せしない。
+   - #45：`cross_control_evidence_refs` の#20由来の自動RDSスナップショット
+     **存在証拠**を再利用可能です。ただしバックアップ網羅性や
+     **復元訓練の実施・成功は証明しない**ため、その部分だけ追加証拠を求めます。
+   - #18：アカウントとバケットBPAの必須条件は元の
+     「アカウント/バケット単位」を基に**Ownerへ一度だけ解釈確認**し、
+     別の公開経路の総点検を当該BPA設定基準の必須条件に拡張しないでください。
 5. #16、#19、#22など設定不備の直接観測と「対応中」かどうかの証明を区別します。
    是正進行の文書がまだ提供されていないことは**是正していないことの証明ではありません**。
    技術的な負の証拠は記録し、ビジネス分類の最終承認はOwnerに委ねます。
@@ -239,7 +254,8 @@ WEB_CLASSIFICATION_PROMPT = """# AWS 46項目・4区分 オフライン分類（
 - `final_classification` : 「対応済み」「未対応」「対応中」「対象外」または null
 - `resolution_state` : `FINALIZED` または `EVIDENCE_PENDING`
 - `evidence_refs` : 根拠として**実際に用いた** `decision_support.plans[number].evidence_refs[].id`
-  またはパッケージに明記され、当該Noを `control_numbers` に含む `supplemental:<id>` のみ。
+  または#45に明示的に割当てられた `cross_control_evidence_refs[].id`、
+  もしくはパッケージに明記され、当該Noを `control_numbers` に含む `supplemental:<id>` のみ。
   参照可能なIDを全件転記せず、主張を支えるものだけを選ぶこと
 - `rationale` : 証拠と不確実性を区別した理由
 - `missing_evidence` : 保留時は具体的な不足証拠を1件以上。確定済みなら []。
