@@ -174,6 +174,46 @@ def test_validation_cli_never_uses_aws_session_and_returns_incomplete_exit(tmp_p
     assert json.loads(capsys.readouterr().out)['pending_count'] == 46
 
 
+def test_validator_rejects_tampered_provenance_index_and_cross_scoped_document():
+    bundle = _bundle()
+    result = _response(bundle)
+    bundle['decision_support']['plans'][0]['evidence_refs'].append({
+        'id': 'finding:1:999',
+        'source': 'controls[number=1].findings[999]',
+        'kind': 'ENGINE_FINDING',
+    })
+    with pytest.raises(ValueError, match='index'):
+        validate_classification_result(bundle, result)
+
+    bundle = _bundle()
+    bundle['supplemental_evidence'] = [{
+        'id': 'incident-plan',
+        'source': 'incident-runbook.md',
+        'collected_at': '2026-10-18T06:00:00+00:00',
+        'control_numbers': [42],
+    }]
+    result = _response(bundle)
+    result['controls'][43]['evidence_refs'] = ['supplemental:incident-plan']
+    with pytest.raises(ValueError, match='cross-control'):
+        validate_classification_result(bundle, result)
+
+
+def test_no_bool_control_id_or_final_with_missing_evidence():
+    bundle = _bundle()
+    result = _response(bundle)
+    result['controls'][0]['number'] = True
+    with pytest.raises(ValueError):
+        validate_classification_result(bundle, result)
+    result = _response(bundle)
+    row = result['controls'][0]
+    row.update(final_classification='未対応',
+               resolution_state='FINALIZED',
+               evidence_refs=['finding:1:0'])
+    result['summary'].update(finalized_count=1, pending_count=45, 未対応=1)
+    with pytest.raises(ValueError, match='blocking gaps'):
+        validate_classification_result(bundle, result)
+
+
 def test_web_handoff_primary_prompt_demands_offline_four_state_with_pending(tmp_path):
     bundle = _bundle()
     paths = save_web_handoff(str(tmp_path), bundle)
