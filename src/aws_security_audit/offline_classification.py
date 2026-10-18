@@ -110,7 +110,7 @@ def _source_refs(control: dict, observations: list[dict]) -> list[dict]:
     return refs
 
 
-def build_decision_support(controls: list[dict], inventory: dict) -> dict:
+def build_decision_support(controls: list[dict], inventory: dict, *, r21_contract: bool = False) -> dict:
     """Non-decisional acquisition plan. Never maps scanner status to final label."""
     if len(controls) != 46 or {row.get('number') for row in controls} != set(range(1, 47)):
         raise ValueError('46 unique normative control IDs required')
@@ -144,7 +144,7 @@ def build_decision_support(controls: list[dict], inventory: dict) -> dict:
         })
     return {
         'schema': 'aws-security-decision-support-v1',
-        'output_contract': output_contract(),
+        **({'output_contract': output_contract()} if r21_contract else {}),
         'shared_scope_contract': common_scope,
         'cross_control_evidence': cross,
         'goal': 'OFFLINE_46_CONTROL_FOUR_STATE_CLASSIFICATION',
@@ -206,6 +206,11 @@ def validate_classification_result(bundle: dict, result: dict) -> dict:
     if result_schema not in ('aws-security-offline-classification-v1',
                              'aws-security-offline-classification-v2'):
         raise ValueError('Unsupported classification schema')
+    has_r21 = support.get('output_contract') is not None
+    if has_r21 and result_schema != 'aws-security-offline-classification-v2':
+        raise ValueError('R21 evidence bundle requires strict v2 classification result')
+    if not has_r21 and result_schema != 'aws-security-offline-classification-v1':
+        raise ValueError('Legacy evidence bundle requires v1 classification result')
     plans = support.get('plans')
     bundle_controls = bundle.get('controls')
     if (not isinstance(bundle_controls, list)
