@@ -281,3 +281,14 @@ def test_verified_automated_snapshot_reused_for_45_without_restore_claim():
     assert row['cross_control_machine_evidence'][0]['fact_type'] == 'AUTOMATED_RDS_SNAPSHOT_EXISTS'
     assert 'successful restore drill' in row['cross_control_machine_evidence'][0]['does_not_prove']
     assert row['owner_adoption_verified'] is False
+
+
+
+def test_live_progress_markdown_labels_absent_supplements_and_owner_scope():
+    report = build_evidence_progress(source())
+    md = render_markdown(report)
+    assert '未評価（分類ファイル未入力）' in md
+    assert 'R24補足証拠: 未取込 / MCP補足要約: 未取込' in md
+    assert '対象資産の網羅性: 要確認' in md
+    assert '（未提供ならNone）' not in md
+    assert '#45への横断証拠: 0件' in md
