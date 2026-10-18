@@ -69,6 +69,26 @@ CONTROL_EVIDENCE_PLAN = {
 }
 assert set(CONTROL_EVIDENCE_PLAN) == set(range(1, 47))
 
+# One shared request can support multiple controls; only ask for the genuinely
+# missing questions after reviewing automatically gathered evidence first.
+HUMAN_CONTEXT_BATCHES = (
+    ('product_scope_network', (1, 3, 4, 5, 6, 7, 14, 21),
+     'Confirm ROS system/host roles, approved ingress sources, supported edge path '
+     'and actual application secret handling; attach existing architecture approvals.'),
+    ('identities_and_data', (9, 10, 11, 12, 13, 15),
+     'Provide the approved personnel-to-identity, DB user and customer-data role '
+     'mapping and exceptions; prefer redacted exports over individual interviews.'),
+    ('logging_monitoring_governance', (26, 28, 29, 30, 31, 34, 35, 36, 37, 38, 41),
+     'Provide current log/monitor/patch/retention policy and owner-approved '
+     'coverage; attach machine-exported settings and alert delivery evidence.'),
+    ('incident_recovery_ownership', (42, 43, 44, 45, 46),
+     'Provide dated incident/recovery/customer escalation/security-owner documents '
+     'and last successful restore drill; redact private contact details.'),
+)
+assert {n for _, ns, _ in HUMAN_CONTEXT_BATCHES for n in ns} == {
+    n for n, (_, _, human) in CONTROL_EVIDENCE_PLAN.items() if human
+}
+
 
 def _source_refs(control: dict, observations: list[dict]) -> list[dict]:
     number = control['number']
@@ -120,6 +140,13 @@ def build_decision_support(controls: list[dict], inventory: dict) -> dict:
         'llm_aws_access': 'PROHIBITED',
         'manual_checks_minimization': 'AUTO_EVIDENCE_FIRST_THEN_ONLY_BLOCKING_OWNER_INPUT',
         'counts_by_acquisition_route': dict(Counter(p['acquisition_route'] for p in plans)),
+        'machine_evidence_first': [
+            p['number'] for p in plans if p['acquisition_route'] != 'OWNER_DOCUMENTATION'],
+        'conditional_human_review_batches': [
+            {'id': name, 'control_numbers': list(numbers),
+             'request_only_if_unresolved': True, 'shared_evidence_request': question}
+            for name, numbers, question in HUMAN_CONTEXT_BATCHES
+        ],
         'plans': plans,
     }
 
