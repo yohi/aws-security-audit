@@ -400,3 +400,24 @@ def test_control6_error_count_only_includes_product_selected_web_acl_reads():
     assert matrix['by_control']['33']['collection_error_count'] == 1
     assert matrix['by_control']['6']['ok'] == 0
     assert matrix['by_control']['6']['fail'] == 0
+
+def test_malformed_extra_action_field_never_proves_verified_summary():
+    """Presence of an invalid extra union field must not be ignored as None."""
+    from copy import deepcopy
+    base = _web_acl()
+    mutations = (
+        # A standalone statement's valid Action is not enough when an
+        # invalid OverrideAction is also present.
+        (1, 'OverrideAction', {'FutureOverride': {'sensitive': 'SENSITIVE'}}),
+        # A referenced group's valid OverrideAction is not enough when an
+        # invalid Action is also present.
+        (0, 'Action', {'FutureAction': {'sensitive': 'SENSITIVE'}}),
+    )
+    for index, name, value in mutations:
+        acl = deepcopy(base)
+        acl['Rules'][index][name] = value
+        result = web_acl_rule_summary(acl)
+        assert result['state'] == 'PARTIAL_RULE_SUMMARY', (index, name)
+        assert result['unclassified_rule_count'] == 1
+        assert result['rule_count'] == 2
+        assert 'SENSITIVE' not in str(result)
