@@ -369,6 +369,75 @@ def _add_s3(ctx, out, errors):
                            tags=tags, name=name, **observed))
 
 
+def _collect_selected_s3_access_evidence(ctx, selected, errors):
+    """Read bounded S3 access evidence only for directly attributed buckets.
+
+    No raw bucket policy, ACL, principal, grant or arbitrary metadata is kept.
+    Bucket/account/org BPA and access-point authorization are separate scopes.
+    """
+    direct_buckets = [
+        resource for resource in selected
+        if resource['service'] == 's3'
+        and resource['resource_type'] == 'bucket'
+        and resource['attribution'] == 'DIRECT'
+    ]
+    if not direct_buckets:
+        return
+    s3 = ctx.client_cached('s3')
+    modes = frozenset({'BucketOwnerEnforced', 'BucketOwnerPreferred', 'ObjectWriter'})
+    for resource in direct_buckets:
+        bucket = resource['resource_id']
+        attrs = resource['attributes']
+        for operation, property_name, lookup_name in (
+            ('get_bucket_policy_status', 'bucket_policy_is_public',
+             'bucket_policy_status_lookup'),
+            ('get_bucket_ownership_controls', 'bucket_object_ownership',
+             'bucket_ownership_lookup'),
+        ):
+            ctx.guard_expiration()
+            try:
+                response = api_call(s3, operation, Bucket=bucket)
+                if operation == 'get_bucket_policy_status':
+                    policy = response.get('PolicyStatus') if isinstance(response, dict) else None
+                    value = policy.get('IsPublic') if isinstance(policy, dict) else None
+                    valid = type(value) is bool
+                else:
+                    controls = (response.get('OwnershipControls')
+                                if isinstance(response, dict) else None)
+                    rules = controls.get('Rules') if isinstance(controls, dict) else None
+                    value = (rules[0].get('ObjectOwnership')
+                             if isinstance(rules, list) and len(rules) == 1
+                             and isinstance(rules[0], dict) else None)
+                    valid = isinstance(value, str) and value in modes
+                if valid:
+                    attrs[property_name] = value
+                    attrs[lookup_name] = 'API_VERIFIED'
+                else:
+                    attrs[property_name] = None
+                    attrs[lookup_name] = 'UNVERIFIED_SCHEMA'
+                    errors.append({'region': 'global', 'service': 's3',
+                                   'operation': operation, 'resource': bucket,
+                                   'reason': 'Successful response schema unverified'})
+            except EvidenceUnavailable as exc:
+                # An absent bucket policy is not an effective non-public proof.
+                # Missing ownership controls likewise do not verify ACL safety.
+                reason = str(exc)
+                if (operation == 'get_bucket_policy_status'
+                        and 'NoSuchBucketPolicy' in reason):
+                    attrs[property_name] = None
+                    attrs[lookup_name] = 'NO_BUCKET_POLICY'
+                elif (operation == 'get_bucket_ownership_controls'
+                      and 'OwnershipControlsNotFoundError' in reason):
+                    attrs[property_name] = None
+                    attrs[lookup_name] = 'NOT_CONFIGURED'
+                else:
+                    attrs[property_name] = None
+                    attrs[lookup_name] = 'UNVERIFIED_READ_ERROR'
+                    errors.append({'region': 'global', 'service': 's3',
+                                   'operation': operation, 'resource': bucket,
+                                   'reason': reason[:180]})
+
+
 def _add_iam(ctx, out, errors):
     iam = ctx.client_cached('iam')
     for user in paged(iam, 'list_users', 'Users'):
@@ -598,6 +667,7 @@ def collect_resource_inventory(ctx, regions, product=None, product_tag=None):
             errors.append(error)
     selected, scope = attribute_resources(inventory, product, product_tag)
     if product is not None:
+        _collect_selected_s3_access_evidence(ctx, selected, errors)
         cf_list_errors = [
             err for err in errors
             if err.get('service') == 'cloudfront'
