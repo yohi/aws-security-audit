@@ -13,9 +13,11 @@ R25 adds two **additive** private progress sidecars:
 - aws_evidence_progress_<timestamp>.md
 
 Both are produced automatically by the existing assess command, including
---llm off. Existing JSON/CSV/XLSX, the 46 normative checklist, historical
-scanner statuses, web handoff, R21 v2 classification schema, and human Owner
-adoption requirements are **unchanged**.
+--llm off. The original JSON/CSV/XLSX 46-row summaries gain **three additive
+columns**: 判定の意味 (explicitly MANUAL_REVIEW != a human work item),
+機械観測の状態 and 次の証拠取得経路. Existing columns, the 46 normative
+checklist, historical scanner status VALUES, report filenames, web handoff,
+R21 v2 classification schema and Owner adoption requirements are unchanged.
 
 ## What it reports
 
