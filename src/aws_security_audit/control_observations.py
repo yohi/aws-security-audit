@@ -50,6 +50,26 @@ def build_product_observations(inventory: dict, regions: list[str]) -> dict:
                 {'public_ipv4': attrs.get('public_ipv4'),
                  'subnet_id': attrs.get('subnet_id'), 'state': attrs.get('state')},
                 'EC2 role as AP/server/bastion is unverified; cannot score AP private placement')
+            if 'subnet_route_lookup' in attrs:
+                lookup = attrs['subnet_route_lookup']
+                context = attrs.get('subnet_route_context')
+                add(1, r, CONTEXT_ONLY if lookup == 'CONFIG_OBSERVED'
+                    and isinstance(context, dict) else PROPERTY_UNKNOWN,
+                    'EC2 selected subnet route table context',
+                    {'lookup': lookup, 'route': context,
+                     'owner_approved_role': attrs.get('owner_approved_role')},
+                    'Configured subnet route, not proven exposure or EC2 application role; '
+                    'owner AP designation, ENI/NACL/route reachability and actual access unknown')
+            if 'ssh_sg_lookup' in attrs:
+                lookup = attrs['ssh_sg_lookup']
+                summary = attrs.get('ssh_port22_ingress_context')
+                add(3, r, CONTEXT_ONLY if lookup == 'CONFIG_OBSERVED'
+                    and isinstance(summary, dict) else PROPERTY_UNKNOWN,
+                    'EC2 attached security group SSH port 22 ingress summary',
+                    {'lookup': lookup, 'summary': summary,
+                     'owner_approved_role': attrs.get('owner_approved_role')},
+                    'SG port 22 configuration only, not verified bastion identity, '
+                    'approved source CIDRs, all ENIs/NACLs or effective SSH reachability')
             add(14, r, CONTEXT_ONLY, 'EC2 connectivity observation',
                 {'state': attrs.get('state'),
                  'subnet_id': attrs.get('subnet_id'),
@@ -328,6 +348,13 @@ def build_product_observations(inventory: dict, regions: list[str]) -> dict:
         matching = [r for r in rows if r['number'] == definition.number]
         counts = Counter(r['property_result'] for r in matching)
         shared_count = sum(r['attribution'] == 'SHARED_UNATTRIBUTED' for r in matching)
+        ec2_direct_provenance = {
+            resource['resource_id']
+            for resource in inventory.get('resources', [])
+            if resource.get('service') == 'ec2'
+            and resource.get('resource_type') == 'instance'
+            and resource.get('attribution') == 'DIRECT'
+        }
         s3_access_provenance = {
             resource['resource_id']
             for resource in inventory.get('resources', [])
@@ -356,6 +383,12 @@ def build_product_observations(inventory: dict, regions: list[str]) -> dict:
                     'get_web_acl_for_resource', 'get_web_acl'
                 )
                 and err.get('resource') in waf_provenance
+            )
+            or (
+                definition.number == 1
+                and err.get('service') == 'ec2'
+                and err.get('operation') == 'describe_route_tables'
+                and err.get('resource') in ec2_direct_provenance
             )
             or (
                 definition.number == 18
