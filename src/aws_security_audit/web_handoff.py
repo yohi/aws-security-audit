@@ -163,7 +163,7 @@ WEB_REVIEW_PROMPT = """あなたはAWSセキュリティ監査の独立した調
 
 # New primary prompt for manual ChatGPT/Gemini Web uploads.
 # Preserve WEB_REVIEW_PROMPT unchanged for older investigation-only consumers.
-WEB_CLASSIFICATION_PROMPT = """# AWS 46項目・4区分 オフライン分類（R20：共通スコープ・証拠再利用）
+WEB_CLASSIFICATION_PROMPT = """# AWS 46項目・4区分 オフライン分類（R21：正式スキーマ・確認依頼集約・主張証拠参照）
 
 あなたは **添付された aws_web_review_*.json だけ**を根拠として46項目を評価する
 証拠評価LLMです。必要に応じて人間が別途アップロードした証拠文書も使用できますが、
@@ -209,6 +209,11 @@ WEB_CLASSIFICATION_PROMPT = """# AWS 46項目・4区分 オフライン分類（
    **一回だけの対象資産・リージョン確認要求**です。
    現状の `owner_approval=PENDING` を承認済みと誤読せず、
    同じ承認証跡を4項目に分けて重複要求しないでください。
+   これらの保留項目では `evidence_requests` に **IDが
+   `scope:product-resource-and-region-coverage` の依頼を1件だけ**作成し、
+   `applies_to_controls` に保留中の#2/#17/#20/#23をまとめます。
+   内容は `shared_scope_contract.single_owner_question` の正確な文字列を使用します。
+   各行はそのIDを `missing_evidence_request_ids` で参照します。
    共通対象範囲が未承認でも、それぞれの実測済み属性は評価します。
 2. 参照可能なID一覧から、**主張に直接関係する少数の証拠IDだけ**を選びます。
    全IDを機械的にコピーしただけでは証拠評価になりません。
@@ -216,11 +221,25 @@ WEB_CLASSIFICATION_PROMPT = """# AWS 46項目・4区分 オフライン分類（
    古い `interpretation` の一般的な未検証警告が新しい観測値と食い違う場合は
    **取得済み事実を優先**し、当該観測が証明しない範囲だけを保留します。
    AWS設定で決着できる問題は、人間による個別判定でなくオフライン証拠で評価します。
+   根拠は各行の `evidence_claims` に **主張と対応証拠IDを組にして**記載します。
+   `evidence_reconciliation.verified_facts` を引用する主張では
+   `verified_fact_code` を指定し、その事実に列挙された実際の
+   `evidence_refs` と完全一致させます。自由記述の根拠IDを捏造しないでください。
+   例えば#18で通常Access Point 0件と書くなら、BPA設定のIDだけでなく
+   `DIRECT_BUCKET_CLASSIC_AP_LIST_EMPTY` の観測値IDを引用してください。
 3. まだ足りない情報は、APIから自動取得できる候補、他システムの自動エクスポート候補、
    人間しか確認できないポリシー・業務・責任境界に分けます。
    decision_support.conditional_human_review_batches は**未解決の場合のみ**使います。
    同じ人間に同じ内容を何度も質問せず、4つの論点別バッチで可能な限り統合し、
    既存の提出証拠で解消した質問は出しません。
+   `evidence_requests` には**同じ証拠を要求する依頼を一件だけ**登録し、
+   `applies_to_controls` に該当する未確定項目番号をすべて列挙してください。
+   `acquisition_channel` は `AWS_LOCAL_READ_ONLY`,
+   `NON_AWS_MACHINE_EXPORT`, `OWNER_CONFIRMATION` のいずれかです。
+   機械的に取得できる設定/ログはまず人間の個別回答を求めず、
+   **人間が実行・取得して別途添付する証拠**としてまとめます。
+   LLM自身がAWS・CI・DBに接続したり、AWS実行コマンドを作成したりしません。
+   同一項目のために既提出証拠を繰り返し要求しないでください。
 4. 特に以下の判定範囲を混同しないでください。
    - #5：元の基準には**不要なアウトバウンド**も含まれます。
      `evidence_reconciliation.verified_facts` のDIRECT SG全許可egressを
@@ -238,6 +257,13 @@ WEB_CLASSIFICATION_PROMPT = """# AWS 46項目・4区分 オフライン分類（
    - #45：`cross_control_evidence_refs` の#20由来の自動RDSスナップショット
      **存在証拠**を再利用可能です。ただしバックアップ網羅性や
      **復元訓練の実施・成功は証明しない**ため、その部分だけ追加証拠を求めます。
+   - #25：CloudTrailログファイル検証の設定を評価します。
+     #24のデータイベント全域の追加証明を#25の必須条件にしないでください。
+   - #32：GuardDutyの有効化状態を評価します。
+     他の通知ワークフローは#34と区別し、#32の新たな必須条件にしません。
+   - #5：危険ポート件数0という集計だけで安全とは判断しません。
+     公開80/443/8000等の実際のインバウンド設定と、
+     全許可アウトバウンドの業務必要性を**別々に検討**します。
    - #18：アカウントとバケットBPAの必須条件は元の
      「アカウント/バケット単位」を基に**Ownerへ一度だけ解釈確認**し、
      別の公開経路の総点検を当該BPA設定基準の必須条件に拡張しないでください。
@@ -246,29 +272,99 @@ WEB_CLASSIFICATION_PROMPT = """# AWS 46項目・4区分 オフライン分類（
    技術的な負の証拠は記録し、ビジネス分類の最終承認はOwnerに委ねます。
 6. 46行すべてを出力します。最終確定はOwner確認に委ねます。
 
-## 出力フォーマット（JSONのみ）
-`schema` は `aws-security-offline-classification-v1`。
-`controls` はNo.1〜46を欠落・重複なく昇順に並べます。
-各要素の必須キー：
-- `number` : 1〜46
+## 出力フォーマット（JSONのみ）— R21固定契約
+
+`decision_support.output_contract` を読み、
+出力 `schema` は **`aws-security-offline-classification-v2`** を使ってください。
+R20のv1分類JSONは参考にはできますが、v2の集約・主張照合機能がありません。
+JSON全文のみ返し、コードフェンスや説明文を付けないでください。
+
+**summaryの4区分件数は必ず直下。**
+`summary.classifications` という入れ子は**禁止**です。
+次は形式例であり、件数は実際の判定に合わせてください：
+
+```json
+{
+  "schema": "aws-security-offline-classification-v2",
+  "summary": {
+    "finalized_count": 3,
+    "pending_count": 43,
+    "対応済み": 0,
+    "未対応": 3,
+    "対応中": 0,
+    "対象外": 0,
+    "distinct_evidence_request_count": 1,
+    "owner_confirmation_request_count": 1,
+    "machine_acquisition_request_count": 0
+  },
+  "evidence_requests": [
+    {
+      "id": "scope:product-resource-and-region-coverage",
+      "acquisition_channel": "OWNER_CONFIRMATION",
+      "status": "REQUESTED_NOT_FULFILLED",
+      "applies_to_controls": [2, 17, 20, 23],
+      "requested_artifact": "(ここには shared_scope_contract.single_owner_question の原文を省略せず記載)"
+    }
+  ],
+  "controls": [
+    {
+      "number": 1,
+      "final_classification": null,
+      "resolution_state": "EVIDENCE_PENDING",
+      "evidence_refs": [],
+      "evidence_claims": [],
+      "rationale": "既存証拠と残る不確実性",
+      "missing_evidence": ["未提出の具体的な証拠"],
+      "missing_evidence_request_ids": ["request:for-control-1"]
+    }
+  ]
+}
+```
+
+上記の例は**意図的に一部のみを示すテンプレート**です。
+実回答では必ず **No.1〜46の46行を昇順・欠落重複なし**で出力し、
+`evidence_requests` はすべての未解決項目に対応する実際の依頼を
+過不足なく持たせ、`summary` の件数も実際の配列から算出してください。
+
+各 `controls[]` に必須：
+- `number` : 1〜46 の整数
 - `final_classification` : 「対応済み」「未対応」「対応中」「対象外」または null
 - `resolution_state` : `FINALIZED` または `EVIDENCE_PENDING`
-- `evidence_refs` : 根拠として**実際に用いた** `decision_support.plans[number].evidence_refs[].id`
-  または#45に明示的に割当てられた `cross_control_evidence_refs[].id`、
-  もしくはパッケージに明記され、当該Noを `control_numbers` に含む `supplemental:<id>` のみ。
-  参照可能なIDを全件転記せず、主張を支えるものだけを選ぶこと
-- `rationale` : 証拠と不確実性を区別した理由
-- `missing_evidence` : 保留時は具体的な不足証拠を1件以上。確定済みなら []。
+- `rationale` : 当該項目の基準、観測、未確定な範囲を区別した理由
+- `evidence_refs` : 当該項目の証拠として利用したIDのみ。
+  #45には明示された#20由来の cross-control IDも許可
+- `evidence_claims` : `[{"claim":"具体的な観測事実", "evidence_refs":["observation:..."],
+  "verified_fact_code":"DIRECT_..."}]`。通常の主張は
+  `verified_fact_code` を省略可能です。**すべての `evidence_refs` IDを
+  いずれかのclaimで実際に使用**し、他項目の証拠を勝手に流用しない
+- `missing_evidence` : 保留時は真に足りない証拠を1件以上、確定時は[]
+- `missing_evidence_request_ids` : rootの `evidence_requests[].id` を参照。
+  保留時は1件以上、確定時は[]。共有要求は全て同じIDを参照し、同じ
+  `requested_artifact` を別依頼として作らない
 
-`summary`: `finalized_count`, `pending_count`, 4区分それぞれの件数。
-合計46。足りない情報が多い場合は46行の大半が EVIDENCE_PENDING でも正しい結果です。
-元エンジンの判定は `controls[].findings` から変更しないでください。
-証拠IDを捏造してはいけません。
+`evidence_requests[]` の各要素は必ず：
+- `id` : 一意な英小文字で始まるID（英小文字・数字・`:`・`_`・`-`・`.`）
+- `acquisition_channel` : `AWS_LOCAL_READ_ONLY` |
+  `NON_AWS_MACHINE_EXPORT` | `OWNER_CONFIRMATION`
+- `status` : `REQUESTED_NOT_FULFILLED`（取得完了・承認済みと偽らない）
+- `applies_to_controls` : この依頼を必要とする**保留中**の項目番号を
+  重複なし昇順で列挙
+- `requested_artifact` : 具体的な取得対象・必要なフィールド・出所・
+  判定に不足する部分を記載（「項目の基準を満たす証拠」等の汎用表現は禁止）
 
-人間はLLM出力JSONをローカルに保存し、
-`aws-security-audit validate-classification --bundle PATH --result PATH` で
-構造と証拠参照をオフライン検証できます。
-検証成功は意味論的な正しさやOwner承認を証明しません。
+`summary` には `finalized_count` と `pending_count`、
+4区分それぞれの**直下**件数、
+`distinct_evidence_request_count`、
+`owner_confirmation_request_count`、
+`machine_acquisition_request_count` を必須とします。
+依頼総数 = Owner依頼数 + 機械取得依頼数です。
+
+厳格な数値・参照検証は
+`aws-security-audit validate-classification --bundle PATH --result PATH`
+を人間のローカルで実行します。
+これは**AWSには一切接続せず**、形式・根拠参照・依頼重複・件数を検証しますが、
+LLMの文章や本当のセキュリティ対応状況の正確性を認定しません。
+元エンジンの判定を変更しないでください。
 """
 
 
