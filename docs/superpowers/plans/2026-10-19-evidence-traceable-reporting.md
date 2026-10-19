@@ -115,7 +115,8 @@ reports from an unchanged bundle preserves IDs; separate runs never merge.
 For historical input without an execution UUID, use the artifact SHA-256 as
 the execution identity and mark it `LEGACY_SOURCE`, rather than minting a new
 run or claiming that two historical artifacts came from the same execution.
-`source_digest` hashes the input artifact bytes and is not execution attestation.
+`source_digest` hashes the input artifact's canonical JSON encoding (sorted
+keys, compact separators, UTF-8) and is not execution attestation.
 `attestation` remains `NOT_PROVEN`.
 
 Do not store raw SDK responses or generic request dictionaries. Keep current
@@ -477,8 +478,10 @@ export functions.
   expected old and new outputs exist and AWS operation sequence is unchanged.
   Repeat with `--llm export`: Web ledger/review equal the report's source model.
   Run `report-progress` with boto3 session creation and network calls patched
-  to raise; require exit `0` for a valid complete legacy bundle, exit `2` for
-  valid output with unresolved requests, and exit `1` for forged evidence.
+  to raise; require exit `0` for successful output with no unresolved requests,
+  exit `2` for valid output with unresolved requests, and exit `1` for invalid
+  evidence or export failure. In this milestone, valid 46-control bundles
+  normally exit `2` because they retain by-construction Owner/criterion requests.
   Assert no SDK call, source rewrite, or business-label upgrade.
 - [ ] Run `uv run --locked pytest tests/test_reporting_workflow.py -q`; expect FAIL.
 - [ ] Implement `report-progress` parser registration and `main()` dispatch

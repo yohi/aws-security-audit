@@ -9,6 +9,7 @@ from __future__ import annotations
 from collections import Counter
 
 from .catalog import CHECKS
+from .observation_provenance import api_for_observation
 
 
 PROPERTY_OK = 'PROPERTY_OK'
@@ -18,11 +19,11 @@ CONTEXT_ONLY = 'CONTEXT_ONLY'
 KINDS = (PROPERTY_OK, PROPERTY_FAIL, PROPERTY_UNKNOWN, CONTEXT_ONLY)
 
 
+
 def build_product_observations(inventory: dict, regions: list[str]) -> dict:
     rows = []
-
-    def add(number, resource, state, property_name, value, interpretation):
-        rows.append({
+    def add(number, resource, state, property_name, value, interpretation, *, api=None):
+        row = {
             'number': number,
             'control': CHECKS[number - 1].title,
             'service': resource['service'],
@@ -38,7 +39,13 @@ def build_product_observations(inventory: dict, regions: list[str]) -> dict:
             'property_result': state,
             'interpretation': interpretation,
             'scope_limit': 'Only this resource/property, not a complete product control PASS',
-        })
+        }
+        if api is None:
+            api = api_for_observation(
+                resource['service'], resource['resource_type'], property_name)
+        if api:
+            row['api'] = api
+        rows.append(row)
 
     for r in inventory.get('resources', []):
         kind = r['resource_type']
@@ -157,7 +164,8 @@ def build_product_observations(inventory: dict, regions: list[str]) -> dict:
                     {'ssl_policy': listener.get('ssl_policy'),
                      'protocols': listener.get('ssl_protocols'),
                      'verification': listener.get('ssl_protocol_evidence')},
-                    'Frontend listener protocols only; backend/internal TLS not certified')
+                    'Frontend listener protocols only; backend/internal TLS not certified',
+                    api='elbv2.DescribeSslPolicies')
             logs = attrs.get('access_logs', {})
             if isinstance(logs, dict) and 'access_logs.s3.enabled' in logs:
                 add(29, r, CONTEXT_ONLY, 'ALB access logs configured',

@@ -2,12 +2,18 @@
 from __future__ import annotations
 
 import re
+from contextlib import nullcontext
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
 import boto3
 from botocore.exceptions import BotoCoreError, ClientError
+
+from .evidence_types import CollectionState
+from .read_capture import (
+    DENIED_CODES, active_capture, client_meta, safe_selector, state_for, utc_now,
+)
 
 
 ROLE_PATTERN = re.compile(r"^arn:(aws(?:-cn|-us-gov)?):iam::([0-9]{12}):role/(?:[\w+=,.@-]+/)*([\w+=,.@-]+)$")
@@ -19,7 +25,21 @@ class AuditError(Exception):
 
 
 class EvidenceUnavailable(AuditError):
-    pass
+    """Evidence could not be collected; message is secret-free by contract.
+
+    The optional attributes (service, operation, code, collection_state)
+    are structured projections stamped by the read adapter; message-only
+    construction keeps every existing raise site valid.
+    """
+
+    def __init__(self, message: str, *, service: str | None = None,
+                 operation: str | None = None, code: str | None = None,
+                 collection_state: CollectionState | None = None):
+        super().__init__(message)
+        self.service = service
+        self.operation = operation
+        self.code = code
+        self.collection_state = collection_state
 
 
 @dataclass
@@ -58,48 +78,164 @@ def api_call(client: Any, operation: str, **kwargs: Any) -> dict:
     if not operation.startswith(('get_', 'describe_', 'list_')) and operation != 'assume_role':
         raise AuditError('Mutating or unapproved AWS API operation rejected')
     """Deliberately don't print SDK exceptions: request payloads might contain sensitive info."""
+    capture = active_capture()
+    if capture is not None and not capture.page_recording:
+        capture = None  # manual token page; the paged layer records the logical call
+    recording = capture is not None
+    service, region = client_meta(client)
+    selector = safe_selector(kwargs) if recording else None
+    started_at = utc_now() if recording else None
     try:
-        return getattr(client, operation)(**kwargs)
+        result = getattr(client, operation)(**kwargs)
     except ClientError as exc:
         code = str(exc.response.get('Error', {}).get('Code', 'ClientError'))
         # Code is an AWS service-defined symbolic label, not a secret.
         safe = re.sub(r'[^A-Za-z0-9_-]', '', code)[:64]
-        raise EvidenceUnavailable(f'{client.meta.service_model.service_name}.{operation}: {safe}') from None
+        state = state_for(safe)
+        if recording:
+            capture.record(
+                service=service, operation=operation, region=region,
+                selector=selector, started_at=started_at, finished_at=utc_now(),
+                collection_state=state, error_code=safe or None,
+                page_count=1, pagination_complete=False, returned_count=None,
+            )
+        raise EvidenceUnavailable(
+            f'{client.meta.service_model.service_name}.{operation}: {safe}',
+            service=service, operation=operation, code=safe or None,
+            collection_state=state,
+        ) from None
     except BotoCoreError as exc:
-        raise EvidenceUnavailable(f'{client.meta.service_model.service_name}.{operation}: {type(exc).__name__}') from None
+        name = type(exc).__name__
+        if recording:
+            capture.record(
+                service=service, operation=operation, region=region,
+                selector=selector, started_at=started_at, finished_at=utc_now(),
+                collection_state=CollectionState.FAILED, error_code=name,
+                page_count=1, pagination_complete=False, returned_count=None,
+            )
+        raise EvidenceUnavailable(
+            f'{client.meta.service_model.service_name}.{operation}: {name}',
+            service=service, operation=operation, code=name,
+            collection_state=CollectionState.FAILED,
+        ) from None
+    if recording:
+        capture.record(
+            service=service, operation=operation, region=region,
+            selector=selector, started_at=started_at, finished_at=utc_now(),
+            collection_state=CollectionState.OBSERVED, error_code=None,
+            page_count=1, pagination_complete=True, returned_count=None,
+        )
+    return result
 
 
 def paged(client: Any, operation: str, result_key: str, **kwargs: Any) -> list:
     if not operation.startswith(('get_', 'describe_', 'list_')):
         raise AuditError('Mutating or unapproved AWS API operation rejected')
+    capture = active_capture()
+    service, region = client_meta(client)
+    selector = safe_selector(kwargs) if capture is not None else None
+    started_at = utc_now() if capture is not None else None
+    collected = []
+    pages = 0  # pages consumed with trusted data
     try:
         if client.can_paginate(operation):
-            collected = []
             for page in client.get_paginator(operation).paginate(**kwargs):
                 collected.extend(page.get(result_key, []))
+                pages += 1
+            if capture is not None:
+                capture.record(
+                    service=service, operation=operation, region=region,
+                    selector=selector, started_at=started_at, finished_at=utc_now(),
+                    collection_state=(CollectionState.OBSERVED if collected
+                                      else CollectionState.VERIFIED_EMPTY),
+                    error_code=None, page_count=pages,
+                    pagination_complete=True, returned_count=len(collected),
+                )
             return collected
     except (ClientError, BotoCoreError) as exc:
         if isinstance(exc, ClientError):
             code = re.sub(r'[^A-Za-z0-9_-]', '', exc.response.get('Error', {}).get('Code', 'ClientError'))[:64]
         else:
             code = type(exc).__name__
-        raise EvidenceUnavailable(f'{client.meta.service_model.service_name}.{operation}: {code}') from None
+        # A denied page after progress leaves a partial projection; any other
+        # interruption (or zero progress) maps through the code policy.
+        state = (CollectionState.PARTIAL
+                 if pages and code in DENIED_CODES else state_for(code))
+        if capture is not None:
+            capture.record(
+                service=service, operation=operation, region=region,
+                selector=selector, started_at=started_at, finished_at=utc_now(),
+                collection_state=state, error_code=code or None,
+                page_count=pages + 1, pagination_complete=False,
+                returned_count=len(collected),
+            )
+        raise EvidenceUnavailable(
+            f'{client.meta.service_model.service_name}.{operation}: {code}',
+            service=service, operation=operation, code=code or None,
+            collection_state=state,
+        ) from None
     # Some legacy AWS APIs don't advertise boto3 paginator support; token traversal.
     output = []
     token = None
-    for _ in range(10000):
-        args = dict(kwargs)
-        if token is not None:
-            args['NextToken'] = token
-        result = api_call(client, operation, **args)
-        output.extend(result.get(result_key, []))
-        next_token = result.get('NextToken')
-        if not next_token:
-            return output
-        if next_token == token:
-            raise EvidenceUnavailable(f'{operation}: pagination cycle')
-        token = next_token
-    raise EvidenceUnavailable(f'{operation}: pagination limit exceeded')
+    attempt = 0  # API attempts made by this one logical call
+    guard = capture.suppress_page_records() if capture is not None else nullcontext()
+    with guard:
+        try:
+            for _ in range(10000):
+                attempt += 1
+                args = dict(kwargs)
+                if token is not None:
+                    args['NextToken'] = token
+                result = api_call(client, operation, **args)
+                output.extend(result.get(result_key, []))
+                next_token = result.get('NextToken')
+                if not next_token:
+                    if capture is not None:
+                        capture.record(
+                            service=service, operation=operation, region=region,
+                            selector=selector, started_at=started_at, finished_at=utc_now(),
+                            collection_state=(CollectionState.OBSERVED if output
+                                              else CollectionState.VERIFIED_EMPTY),
+                            error_code=None, page_count=attempt,
+                            pagination_complete=True, returned_count=len(output),
+                        )
+                    return output
+                if next_token == token:
+                    raise EvidenceUnavailable(
+                        f'{operation}: pagination cycle',
+                        operation=operation,
+                        collection_state=CollectionState.FAILED,
+                    )
+                token = next_token
+        except EvidenceUnavailable as exc:
+            if capture is not None:
+                # api_call stamps a code for its own failures; a code-less
+                # exception here is paged's own traversal detection (cycle).
+                code = exc.code
+                consumed = attempt if code is None else attempt - 1
+                state = (CollectionState.PARTIAL
+                         if code in DENIED_CODES and consumed else state_for(code))
+                capture.record(
+                    service=service, operation=operation, region=region,
+                    selector=selector, started_at=started_at, finished_at=utc_now(),
+                    collection_state=state, error_code=code,
+                    page_count=attempt, pagination_complete=False,
+                    returned_count=len(output),
+                )
+            raise
+    if capture is not None:
+        capture.record(
+            service=service, operation=operation, region=region,
+            selector=selector, started_at=started_at, finished_at=utc_now(),
+            collection_state=CollectionState.FAILED, error_code=None,
+            page_count=attempt, pagination_complete=False,
+            returned_count=len(output),
+        )
+    raise EvidenceUnavailable(
+        f'{operation}: pagination limit exceeded',
+        operation=operation,
+        collection_state=CollectionState.FAILED,
+    )
 
 
 class AuditContext:

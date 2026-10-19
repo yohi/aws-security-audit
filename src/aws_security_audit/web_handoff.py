@@ -8,12 +8,18 @@ from uuid import uuid4
 from .report import _private_bytes
 
 
-def build_web_review_bundle(metadata: dict, rows: list[dict], findings: list, investigation: dict, resource_inventory: dict | None = None) -> dict:
+def build_web_review_bundle(metadata: dict, rows: list[dict], findings: list,
+                            investigation: dict,
+                            resource_inventory: dict | None = None,
+                            *, ledger=None, review=None) -> dict:
     """Combine original 46-control evidence and read-only deep observations into one uploadable JSON.
 
     No AWS API or external network call is made here. Identity metadata is
-    deliberately minimized; original finding evidence can still disclose
-    sensitive resource names/IDs and MUST be inspected before manual upload.
+    deliberately minimized; the evidence ledger contains the execution account,
+    and original findings can disclose sensitive resource names/IDs. Inspect
+    the attachment before any manual upload.
+    Optional typed ledger plus control review embed the same shared model,
+    so Web consumers see identical evidence and request references.
     """
     by_number: dict[int, list[dict]] = {}
     for finding in findings:
@@ -54,7 +60,7 @@ def build_web_review_bundle(metadata: dict, rows: list[dict], findings: list, in
     decision_support = build_decision_support(
         controls, resource_inventory or {'resources': [], 'collection_errors': []},
         r21_contract=True)
-    return {
+    bundle = {
         'schema': 'aws-security-audit-web-review-v1',
         'purpose': 'INVESTIGATION_ONLY',
         'classification_intent': 'OFFLINE_46_CONTROL_FOUR_STATE_ADVISORY',
@@ -103,12 +109,27 @@ def build_web_review_bundle(metadata: dict, rows: list[dict], findings: list, in
             'An LLM must not independently upgrade FAIL/UNKNOWN/MANUAL_REVIEW to PASS.',
             'AWS remediation, infrastructure modification, active probing, and write APIs are out of scope.',
         ],
-        'upload_warning': (
-            'Contains AWS configuration observations, resource identifiers and potentially '
-            'sensitive resource names in original findings. Manually inspect before attaching '
+    'upload_warning': (
+            'Contains AWS account identifiers, configuration observations, resource identifiers and '
+            'potentially sensitive resource names in original findings. Manually inspect before attaching '
             'to ChatGPT Web, Gemini Web, or any other external service.'
         ),
     }
+    if (ledger is None) != (review is None):
+        raise ValueError('web handoff: ledger and review must be provided together')
+    if ledger is not None:
+        from .evidence_ledger import EvidenceLedger, ledger_to_json
+        from .evidence_types import REVIEW_SCHEMA, ControlReview
+        from .control_review import control_review_to_json
+        if (not isinstance(ledger, EvidenceLedger)
+                or not isinstance(review, ControlReview)
+                or review.schema != REVIEW_SCHEMA):
+            raise ValueError('web handoff: expected typed ledger and control review')
+        # Same shared projections the progress report and exports render;
+        # additive keys only, existing clients keep reading their fields.
+        bundle['evidence_ledger'] = ledger_to_json(ledger)
+        bundle['control_review'] = control_review_to_json(review)
+    return bundle
 
 
 WEB_REVIEW_PROMPT = """あなたはAWSセキュリティ監査の独立した調査・証拠評価アナリストです。

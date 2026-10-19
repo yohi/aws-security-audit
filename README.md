@@ -156,7 +156,44 @@ This runs the existing 46 checks and supplemental inspection for #5 (dangerous s
 
 This is **investigation only**: no AWS IAM, networking, EBS, EC2, logging, or Security Hub configuration changes; no automated remediation; no active probing. Any claim of effective IAM No-Write remains **NOT PROVEN**, regardless of session policy. The full operating contract and limitations are in [docs/INVESTIGATION_ONLY.md](docs/INVESTIGATION_ONLY.md).
 
+## Evidence-traceable progress reporting (offline)
 
+`assess` now records its existing read-only collection outcomes in a passive
+capture side-channel and exports one shared evidence ledger
+(`evidence_ledger`) and criterion-aware review model (`control_review`) to
+every format: additive audit columns in the classic JSON/CSV/XLSX report,
+the same model embedded in `aws_web_review_*.json`, and a
+`aws_evidence_progress_<stamp>.{json,md,csv,xlsx}` set plus a per-set
+integrity manifest. Scanner verdicts (`判定`) are never rewritten and
+business four-state labels only come from a submitted classification
+candidate; unresolved evidence requests are deduplicated by kind, scope and
+requirement key. Request IDs appear in additive audit columns; full request
+details are included in progress and Web exports.
+
+The offline `report-progress` command rebuilds the same progress report
+from saved local files only — a previous `aws_web_review` bundle plus an
+optional classification candidate — with no AWS session, no credentials and
+no network access:
+
+Optional `--r24` and `--mcp-summary` supplements are also processed offline;
+both require `--account`.
+
+```bash
+uv run --locked --no-sync aws-security-audit report-progress \\
+  --bundle ./reports/aws_web_review_20261019.json \\
+  --classification ./reports/labels/classification-candidate.json \\
+  --out ./reports/progress
+```
+
+Exit code follows the review model, not the certification state:
+`0` = exported, `outstanding_evidence_requests` empty; `2` = exported but
+unresolved evidence requests remain (real bundles keep by-construction
+Owner/criterion questions, so they normally exit `2`);
+`1` = invalid input or export failure.
+No AWS or LLM connection is used. Flags, exit semantics, schemas, field
+meanings, legacy limits, file relationships and source-digest limits (integrity,
+not provenance) are documented in
+[docs/evidence-traceable-reporting.md](docs/evidence-traceable-reporting.md).
 
 ## Resource identity and product-scoped investigation (draft PR)
 
