@@ -799,3 +799,11 @@ def test_api_join_matches_resource_arn_selector():
 
     fact = next(fact for fact in ledger.facts if fact.number == 6)
     assert fact.call_refs == (call.id,)
+
+
+def test_global_resource_row_joins_call_without_region_equality():
+    call = make_call(region=REGION)
+
+    ledger = build_ledger(joint_bundle({'region': 'global'}), calls=(call,))
+
+    assert ledger.facts[0].call_refs == (call.id,)

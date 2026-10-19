@@ -128,6 +128,26 @@ def test_review_preserves_order_criteria_and_scanner_statuses(review_inputs):
             assert row.criterion_checks[0].limitation
 
 
+def test_observation_fact_joins_selected_resource_scope():
+    observation = row(2, 'public', 'PROPERTY_OK', False,
+                      'db-instance', 'db-syn-1')
+    observation['region'] = REGION
+    resource = {
+        'service': 'rds', 'resource_type': 'db-instance', 'region': REGION,
+        'resource_id': 'db-syn-1', 'name': 'db-syn-1',
+        'attribution': 'DIRECT', 'attribution_evidence': 'TAG:Project=syn',
+        'attributes': {},
+    }
+    bundle = synthetic_bundle([observation], [resource])
+    ledger = build_ledger(bundle)
+
+    review = build_control_review(bundle, ledger)
+
+    scope_ids = {check.id for check in ledger.scope_checks}
+    assert scope_ids
+    assert set(review.rows[1].scope_refs) & scope_ids
+
+
 def test_no5_allow_all_egress_needs_necessity_context():
     rows = [row(5, 'public ingress and all-protocol public egress',
                 'CONTEXT_ONLY', {'all_protocol_public_egress_rule_count': 1},

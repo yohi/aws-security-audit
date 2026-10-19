@@ -175,15 +175,15 @@ from saved local files only — a previous `aws_web_review` bundle plus an
 optional classification candidate — with no AWS session, no credentials and
 no network access:
 
-Optional `--r24` and `--mcp-summary` supplements are also processed offline;
-both require `--account`.
-
 ```bash
-uv run --locked --no-sync aws-security-audit report-progress \\
-  --bundle ./reports/aws_web_review_20261019.json \\
-  --classification ./reports/labels/classification-candidate.json \\
+uv run --locked --no-sync aws-security-audit report-progress \
+  --bundle ./reports/aws_web_review_20261019.json \
+  --classification ./reports/labels/classification-candidate.json \
   --out ./reports/progress
 ```
+
+Optional `--r24` and `--mcp-summary` supplements are also processed offline;
+both require `--account`.
 
 Exit code follows the review model, not the certification state:
 `0` = exported, `outstanding_evidence_requests` empty; `2` = exported but

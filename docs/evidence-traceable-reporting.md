@@ -86,8 +86,10 @@ supplied, with `--account`.
    a metadata-only `CallRecord` (service, operation, region, safe selector,
    timing, collection state, paging state). Selectors never include
    credential/token-like data.
-2. The recorded calls join the evidence ledger (`evidence_ledger`), keeping
-   walk named in the ledger can never silently become `verified absence`.
+2. Each recorded call is added to the evidence ledger (`evidence_ledger`),
+   preserving failures, access denials and partial collection or pagination
+   explicitly. An incomplete scan therefore cannot silently become
+   `verified absence`.
 3. One criterion-aware review model (`control_review`, exactly 46 rows) is
    built from the same bundle + ledger and passed to every exporter:
    - `aws_security_audit_*.json/csv/xlsx` gain additive audit columns

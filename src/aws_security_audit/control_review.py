@@ -102,9 +102,22 @@ def _picked(indexes, facts: dict) -> list:
     return [facts[i].id for i in indexes if i in facts]
 
 
-def _join_scopes(ledger: EvidenceLedger, fact_ids: tuple) -> tuple:
+def _join_scopes(
+    ledger: EvidenceLedger, fact_ids: tuple, rows_source: list,
+) -> tuple:
     wanted = set(fact_ids)
-    keys = {f.resource_key for f in ledger.facts if f.id in wanted} - {None}
+    row_refs = {
+        fact.source_ref for fact in ledger.facts
+        if fact.id in wanted and fact.source_ref.startswith(_ROW_PREFIX)
+    }
+    keys = {
+        '/'.join(row[field] for field in ('region', 'resource_type', 'resource_id'))
+        for index, row in enumerate(rows_source)
+        if isinstance(row, dict)
+        and f'{_ROW_PREFIX}{index}]' in row_refs
+        and all(isinstance(row.get(field), str) and row[field]
+                for field in ('region', 'resource_type', 'resource_id'))
+    }
     return tuple(check.id for check in ledger.scope_checks
                  if set(check.selected_resource_keys) & keys)
 
@@ -252,7 +265,7 @@ def build_control_review(bundle: dict, ledger: EvidenceLedger,
         control = by_number[definition.number]
         facts = [f for f in ledger.facts if f.number == definition.number]
         fact_ids = tuple(fact.id for fact in facts)
-        scoped = _join_scopes(ledger, fact_ids)
+        scoped = _join_scopes(ledger, fact_ids, rows_source)
         if definition.number in _SPECIALIZED:
             rules = reconcile_control(definition.number, rows_source)
             checks = _specialized(definition.number, rows_source, rules,
