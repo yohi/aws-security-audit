@@ -1,10 +1,11 @@
-"""Public CLI: setup | doctor | scan | assess | policy-evidence | version."""
+"""Public CLI: setup | doctor | scan | assess | policy-evidence | validate-classification | report-progress | version."""
 from __future__ import annotations
 
 import argparse
 import json
 import os
 import sys
+import uuid
 from collections import Counter
 from pathlib import Path
 
@@ -48,6 +49,18 @@ def parser() -> argparse.ArgumentParser:
         help='Validate manually saved LLM 46-control JSON result against an offline evidence bundle; no AWS connection')
     offline.add_argument('--bundle', required=True, help='Local aws_web_review JSON evidence package')
     offline.add_argument('--result', required=True, help='Local LLM JSON classification result')
+    progress = sub.add_parser(
+        'report-progress',
+        help='Build evidence-first 46-control progress report from saved files only; no AWS',
+    )
+    progress.add_argument('--bundle', required=True)
+    progress.add_argument(
+        '--classification', help='Saved v1/v2 classification candidate (optional)')
+    progress.add_argument('--r24', help='Saved R24 operator-read evidence JSON (optional)')
+    progress.add_argument('--mcp-summary', help='Explicit operator-curated MCP summary (optional)')
+    progress.add_argument('--account', help='Expected AWS account for supplemental evidence')
+    progress.add_argument('--out', default='reports',
+                          help='Private output directory (default: reports)')
     sub.add_parser('version', help='Show package version')
     return p
 
@@ -72,6 +85,18 @@ def local_config(args: argparse.Namespace) -> dict:
         if any(char in cfg[field] for char in '\r\n\0'):
             raise AuditError('Invalid configuration')
     return cfg
+
+
+def _progress_exit_code(progress: dict) -> int:
+    """Exit code per the review model's outstanding evidence requests.
+
+    `0` = no unresolved evidence requests; `2` = the export succeeded but
+    `outstanding_evidence_requests` is non-empty. Classification pending
+    rows are reported data, never the exit condition: pending evidence is
+    not a fifth business label nor a count of human tasks.
+    """
+    requests = progress.get('outstanding_evidence_requests') or []
+    return 2 if requests else 0
 
 
 def setup(args: argparse.Namespace) -> int:
@@ -295,6 +320,40 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps(checked, ensure_ascii=False, sort_keys=True))
             # A well-formed but unresolved report is incomplete by design.
             return 2 if checked['pending_count'] else 0
+        if args.command == 'report-progress':
+            # Explicitly offline: do not invoke prepare(), boto3, or AWS sessions.
+            from .evidence_progress_report import (
+                build_evidence_progress_with_model, save_progress_report,
+            )
+            try:
+                if (args.r24 or args.mcp_summary) and not args.account:
+                    raise ValueError('--account is mandatory for supplemental evidence')
+                def load(path):
+                    if path is None:
+                        return None
+                    with Path(path).open(encoding='utf-8') as stream:
+                        return json.load(stream)
+                bundle = load(args.bundle)
+                classification = load(args.classification)
+                r24 = load(args.r24)
+                mcp_summary = load(args.mcp_summary)
+                progress, review, ledger = build_evidence_progress_with_model(
+                    bundle, classification, r24=r24, mcp_summary=mcp_summary,
+                    expected_account=args.account,
+                )
+                # One typed review model: CSV/XLSX/manifest render from it.
+                paths = save_progress_report(
+                    args.out, progress, review=review, ledger=ledger)
+            except (OSError, ValueError, TypeError, KeyError) as exc:
+                print(f'Progress report failed: {type(exc).__name__}', file=sys.stderr)
+                return 1
+            print(json.dumps(progress['summary'], ensure_ascii=False, sort_keys=True))
+            for path in paths:
+                print(f'Report: {path}')
+            # Exit code follows the review model's outstanding evidence
+            # requests (not the classification state): 0 = none left,
+            # 2 = exports produced but requests remain.
+            return _progress_exit_code(progress)
         ctx, regions = prepare(args)
         print(f'Assumed role (STS): {ctx.identity_arn} | source: {ctx.source_profile}', flush=True)
         print('STS session policy: ReadOnlyAccess (role/session-policy intersection; resource-based grants may bypass implicit denial; EFFECTIVE_NO_WRITE=NOT_PROVEN)', flush=True)
@@ -304,6 +363,7 @@ def main(argv: list[str] | None = None) -> int:
             return policy_evidence(ctx, out=args.out)
         options = {'regions': regions, 'all_account_regions': ctx.active_regions(), 'ap_tag': args.ap_tag}
         inventory = None
+        investigation = None
         if args.command == 'assess':
             if args.product_tag and not args.product:
                 raise AuditError('--product-tag requires --product')
@@ -314,38 +374,58 @@ def main(argv: list[str] | None = None) -> int:
             if args.product and (len(args.product) > 128 or
                                  any(ord(c) < 32 for c in args.product)):
                 raise AuditError('Invalid product identifier')
+            # Passive side-channel only: existing reads keep their calls,
+            # counts and data; the capture projects them into the ledger.
+            from .evidence_ledger import evidence_id
+            from .evidence_types import NOT_PROVEN, Execution
+            from .read_capture import capture_reads
+            execution = Execution(
+                id=evidence_id('execution', {
+                    'run_id': uuid.uuid4().hex,
+                    'version': __version__, 'account': ctx.account,
+                    'role_arn': ctx.expected_role_arn,
+                    'regions': regions, 'product': args.product,
+                }),
+                source_kind='live_capture_v1', account=ctx.account,
+                regions=tuple(regions), product=args.product,
+                started_at=None, finished_at=None, source_digest=None,
+                attestation=NOT_PROVEN,
+            )
             from .resource_scope import collect_resource_inventory, product_findings
-            if args.product:
-                print(f'PRODUCT SCOPE: {args.product} (conservative matching; unassigned/shared resources are not PASS)', flush=True)
-                inventory = collect_resource_inventory(ctx, regions, args.product, args.product_tag)
-                from .control_observations import build_product_observations
-                observed = build_product_observations(inventory, regions)
-                inventory['control_observations'] = observed
-                by_control = observed['by_control'].values()
-                print(
-                    'PRODUCT PROPERTY EVIDENCE: '
-                    f"controls_with_attributes={sum(x['observed_resources'] > 0 for x in by_control)}/46 "
-                    f"property_ok={sum(x['ok'] for x in observed['by_control'].values())} "
-                    f"property_fail={sum(x['fail'] for x in observed['by_control'].values())} "
-                    f"property_unknown_or_context={sum(x['unknown'] + x['context'] for x in observed['by_control'].values())} "
-                    '(resource-property checks only; no product-wide PASS inference)',
-                    flush=True,
-                )
-                records = product_findings(inventory, regions)
-                for item in records:
-                    if item.status == 'FAIL':
-                        print(f'{item.number:02d} {item.scope:20s} FAIL           product evidence only', flush=True)
-            else:
-                records = run_scan(ctx, regions, options)
-                # Preserve the established #5/#19 deep evidence before the expanded
-                # identity inventory adds extra read traffic and consumes STS lifetime.
-                from .investigation import build_investigation
-                investigation = build_investigation(
-                    ctx, regions, overall_rows(
-                        records, coverage_full=set(regions) == set(options['all_account_regions'])
-                    ), records)
-                inventory = collect_resource_inventory(ctx, regions)
+            with capture_reads(execution) as capture:
+                if args.product:
+                    print(f'PRODUCT SCOPE: {args.product} (conservative matching; unassigned/shared resources are not PASS)', flush=True)
+                    inventory = collect_resource_inventory(ctx, regions, args.product, args.product_tag)
+                    from .control_observations import build_product_observations
+                    observed = build_product_observations(inventory, regions)
+                    inventory['control_observations'] = observed
+                    by_control = observed['by_control'].values()
+                    print(
+                        'PRODUCT PROPERTY EVIDENCE: '
+                        f"controls_with_attributes={sum(x['observed_resources'] > 0 for x in by_control)}/46 "
+                        f"property_ok={sum(x['ok'] for x in observed['by_control'].values())} "
+                        f"property_fail={sum(x['fail'] for x in observed['by_control'].values())} "
+                        f"property_unknown_or_context={sum(x['unknown'] + x['context'] for x in observed['by_control'].values())} "
+                        '(resource-property checks only; no product-wide PASS inference)',
+                        flush=True,
+                    )
+                    records = product_findings(inventory, regions)
+                    for item in records:
+                        if item.status == 'FAIL':
+                            print(f'{item.number:02d} {item.scope:20s} FAIL           product evidence only', flush=True)
+                else:
+                    records = run_scan(ctx, regions, options)
+                    # Preserve the established #5/#19 deep evidence before the expanded
+                    # identity inventory adds extra read traffic and consumes STS lifetime.
+                    from .investigation import build_investigation
+                    investigation = build_investigation(
+                        ctx, regions, overall_rows(
+                            records, coverage_full=set(regions) == set(options['all_account_regions'])
+                        ), records)
+                    inventory = collect_resource_inventory(ctx, regions)
+            captured_calls = capture.snapshot()
         else:
+            captured_calls = ()
             records = run_scan(ctx, regions, options)
         full_coverage = set(regions) == set(options['all_account_regions'])
         overview = overall_rows(
@@ -365,10 +445,8 @@ def main(argv: list[str] | None = None) -> int:
             'session_policy': 'arn:aws:iam::aws:policy/ReadOnlyAccess',
             'note': 'No AWS resources were changed; manual/unknown statuses are not PASS.',
         }
-        paths = export_report(args.out, records, metadata, resource_inventory=inventory)
+        paths = []
         if args.command == 'assess':
-            from .resource_scope import save_resource_inventory
-            paths.extend(save_resource_inventory(args.out, inventory))
             if args.product:
                 from .resource_scope import product_deep_evidence
                 investigation = {
@@ -384,17 +462,39 @@ def main(argv: list[str] | None = None) -> int:
                     ],
                 }
                 print('PRODUCT SCOPE: account-wide scanner skipped; all unproven control statuses remain MANUAL_REVIEW/UNKNOWN', flush=True)
-            else:
+            # One review model from the same bundle feeds every exporter:
+            # audit summary columns, Web handoff embed and progress exports.
+            from .evidence_progress_report import (
+                build_evidence_progress_with_model, save_progress_report,
+            )
+            from .web_handoff import build_web_review_bundle
+            bundle = build_web_review_bundle(metadata, overview, records, investigation,
+                                             resource_inventory=inventory)
+            progress, review, ledger = build_evidence_progress_with_model(
+                bundle, calls=captured_calls, execution=execution)
+            bundle = build_web_review_bundle(metadata, overview, records, investigation,
+                                             resource_inventory=inventory,
+                                             ledger=ledger, review=review)
+            paths = export_report(args.out, records, metadata,
+                                  resource_inventory=inventory, review=review)
+            from .resource_scope import save_resource_inventory
+            paths.extend(save_resource_inventory(args.out, inventory))
+            if not args.product:
                 from .investigation import save_investigation
                 paths.extend(save_investigation(args.out, investigation, llm_export=False))
+            stamp = metadata['timestamp'].replace(':', '-').replace('+', '-')
+            paths.extend(save_progress_report(
+                args.out, progress, basename=f'aws_evidence_progress_{stamp}',
+                review=review, ledger=ledger,
+            ))
             if args.llm == 'export':
-                from .web_handoff import build_web_review_bundle, save_web_handoff
-                bundle = build_web_review_bundle(metadata, overview, records, investigation,
-                                                 resource_inventory=inventory)
+                from .web_handoff import save_web_handoff
                 paths.extend(save_web_handoff(args.out, bundle))
                 print('WEB HANDOFF: attach aws_web_review_*.json to ChatGPT/Gemini Web and paste aws_web_prompt_*.md', flush=True)
-                print('SENSITIVE DATA NOTICE: inspect the attachment before uploading; it contains original finding evidence', flush=True)
+                print('SENSITIVE DATA NOTICE: inspect the attachment before uploading; it includes AWS account identifiers and original finding evidence', flush=True)
                 print('No file was uploaded and no LLM API was called', flush=True)
+        else:
+            paths = export_report(args.out, records, metadata, resource_inventory=inventory)
         if not full_coverage:
             print('WARNING: partial region coverage; full-account PASS is withheld', flush=True)
         print('Summary: ' + ', '.join(f'{name}={counts[name]}' for name in ('PASS', 'FAIL', 'UNKNOWN', 'MANUAL_REVIEW', 'NOT_APPLICABLE')))

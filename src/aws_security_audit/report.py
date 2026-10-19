@@ -4,14 +4,15 @@ from __future__ import annotations
 import csv
 import json
 import os
-from collections import Counter
 from io import BytesIO
 from pathlib import Path
 from xml.etree import ElementTree as ET
+from xml.sax.saxutils import escape
 from zipfile import ZIP_DEFLATED, ZipFile
 
 from .catalog import CHECKS
 from .core import Finding, overall_status
+from .evidence_types import ControlReview
 
 
 NS = 'http://schemas.openxmlformats.org/spreadsheetml/2006/main'
@@ -26,7 +27,8 @@ def _summary_preview(value: str) -> str:
 
 
 def overall_rows(results: list[Finding], *, coverage_full: bool = False,
-                 observations: dict | None = None) -> list[dict]:
+                 observations: dict | None = None,
+                 review: 'ControlReview | None' = None) -> list[dict]:
     by_id = {c.number: [] for c in CHECKS}
     for finding in results:
         by_id[finding.number].append(finding)
@@ -52,12 +54,42 @@ def overall_rows(results: list[Finding], *, coverage_full: bool = False,
         })
 
     if observations is not None:
+        from .offline_classification import CONTROL_EVIDENCE_PLAN
         for row in output:
             stats = observations.get('by_control', {}).get(str(row['No']), {})
             row['確認済み属性OK'] = stats.get('ok', 0)
             row['確認済み属性NG'] = stats.get('fail', 0)
             row['属性未確認・参考'] = stats.get('unknown', 0) + stats.get('context', 0)
             row['属性証拠カバレッジ'] = stats.get('evidence_state', 'NO_RESOURCE_EVIDENCE')
+            # The scanner status is immutable; these additive columns explain
+            # actual machine evidence without implying 43 human tasks or PASS.
+            row['判定の意味'] = (
+                'スキャナー保留（手動作業件数ではない）'
+                if row['判定'] == 'MANUAL_REVIEW'
+                else 'スキャナーの技術判定（Owner最終分類ではない）'
+            )
+            row['機械観測の状態'] = (
+                '対象属性の観測あり（プロダクト全体の適合とは別）'
+                if sum(stats.get(k, 0) for k in ('ok', 'fail', 'unknown', 'context'))
+                else '対象属性の機械観測なし（手動作業確定ではない）'
+            )
+            row['次の証拠取得経路'] = CONTROL_EVIDENCE_PLAN[row['No']][0]
+    # Additive review columns; JSON stays authoritative and the scanner
+    # verdicts above are never rewritten by evidence state.
+    if review is not None:
+        from .review_export import _cell, open_reasons
+        if not isinstance(review, ControlReview):
+            raise ValueError('overall_rows expects a ControlReview or None')
+        by_number = {row.number: row for row in review.rows}
+        for row in output:
+            state = by_number.get(row['No'])
+            if state is None:
+                raise ValueError('review rows and audit summary disagree')
+            row['証拠充足状態'] = state.evidence_state.value
+            row['証拠参照ID'] = _cell(state.fact_refs)
+            row['対象範囲参照ID'] = _cell(state.scope_refs)
+            row['未確定理由'] = open_reasons(state)
+            row['追加確認ID'] = _cell(state.request_ids)
     return output
 
 
@@ -98,14 +130,66 @@ def _sheet_xml(matrix: list[list[str]], widths: list[float], *, filter_header: b
     return ET.tostring(worksheet, encoding='utf-8', xml_declaration=True)
 
 
+# One minimal workbook generated from the sheet list itself: sheet XML part
+# names, content-type overrides, workbook tags and relationships all follow
+# len(sheets), so new tables never hardcode more sheet counts.
+_CT_WORKBOOK = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml'
+_CT_STYLES = 'application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml'
+_CT_SHEET = 'application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml'
+
+
+def _workbook_bytes(sheets: list[tuple[str, list[list[str]], list[float]]]) -> bytes:
+    wb = BytesIO()
+    count = len(sheets)
+    overrides = ''.join(
+        '<Override PartName="/xl/worksheets/sheet%d.xml" ContentType="%s"/>'
+        % (i, _CT_SHEET) for i in range(1, count + 1))
+    worksheet_rels = ''.join(
+        '<Relationship Id="rId%d" Type="%s/worksheet" Target="worksheets/sheet%d.xml"/>'
+        % (i, REL, i) for i in range(1, count + 1))
+    sheets_xml = ''.join(
+        '<sheet name="%s" sheetId="%d" r:id="rId%d"/>'
+        % (escape(name), i, i)
+        for i, (name, _, _) in enumerate(sheets, 1))
+    with ZipFile(wb, 'w', ZIP_DEFLATED) as arc:
+        arc.writestr('[Content_Types].xml',
+            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+            '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
+            '<Default Extension="xml" ContentType="application/xml"/>'
+            '<Override PartName="/xl/workbook.xml" ContentType="%s"/><Override PartName="/xl/styles.xml" ContentType="%s"/>'
+            % (_CT_WORKBOOK, _CT_STYLES) + overrides + '</Types>')
+        arc.writestr('_rels/.rels',
+            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+            '<Relationship Id="rId1" Type="%s/officeDocument" Target="xl/workbook.xml"/> '
+            '</Relationships>' % REL)
+        arc.writestr('xl/workbook.xml',
+            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            f'<workbook xmlns="{NS}" xmlns:r="{REL}"><sheets>{sheets_xml}</sheets></workbook>')
+        arc.writestr('xl/_rels/workbook.xml.rels',
+            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+            + worksheet_rels
+            + '<Relationship Id="rId%d" Type="%s/styles" Target="styles.xml"/>' % (count + 1, REL) + '</Relationships>')
+        arc.writestr('xl/styles.xml', f'<?xml version="1.0" encoding="UTF-8" standalone="yes"?><styleSheet xmlns="{NS}"><fonts count="2"><font><sz val="10"/><name val="Aptos"/></font><font><b/><sz val="10"/><color rgb="FFFFFFFF"/><name val="Aptos"/></font></fonts><fills count="3"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill><fill><patternFill patternType="solid"><fgColor rgb="FF153A59"/><bgColor indexed="64"/></patternFill></fill></fills><borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders><cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs><cellXfs count="2"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/><xf numFmtId="0" fontId="1" fillId="2" borderId="0" xfId="0" applyFont="1" applyFill="1"/></cellXfs></styleSheet>')
+        for i, (_, matrix, widths) in enumerate(sheets, 1):
+            arc.writestr(f'xl/worksheets/sheet{i}.xml', _sheet_xml(matrix, widths))
+    return wb.getvalue()
+
+
 def _excel_bytes(rows: list[dict], details: list[dict], meta: dict,
                  resources: list[dict] | None = None,
                  observations: list[dict] | None = None) -> bytes:
-    wb = BytesIO()
     summary_keys = list(rows[0])
     detail_keys = ['No', 'scope', 'status', 'detail', 'evidence']
+    # Additive review columns widen the summary; the width list is sliced to the
+    # actual header count so the historical and review layouts both render.
+    summary_widths = [8, 22, 32, 65, 12, 46, 19, 19, 24, 65, 32, 75, 17, 17, 18, 30,
+                      45, 56, 30, 16, 44, 44, 46, 44][:len(summary_keys)]
     tables = [
-        ([summary_keys] + [[str(x.get(k, '')) for k in summary_keys] for x in rows], [8, 22, 32, 65, 12, 46, 19, 19, 24, 65, 32, 75, 17, 17, 18, 30][:len(summary_keys)]),
+        ([summary_keys] + [[str(x.get(k, '')) for k in summary_keys] for x in rows],
+         summary_widths),
         ([detail_keys] + [[str(d.get(k, '')) for k in detail_keys] for d in details], [8, 25, 19, 65, 78]),
         ([['項目', '値']] + [[k, str(v)] for k, v in meta.items()], [28, 100]),
     ]
@@ -128,15 +212,12 @@ def _excel_bytes(rows: list[dict], details: list[dict], meta: dict,
                       for key in obs_keys] for r in observations]
         tables.append(([obs_keys] + obs_lines,
                        [10, 28, 21, 16, 24, 18, 32, 32, 68, 17, 35, 70, 70, 70]))
-    with ZipFile(wb, 'w', ZIP_DEFLATED) as arc:
-        arc.writestr('[Content_Types].xml', '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/><Override PartName="/xl/worksheets/sheet2.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/><Override PartName="/xl/worksheets/sheet3.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/><Override PartName="/xl/worksheets/sheet4.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>' + ('<Override PartName="/xl/worksheets/sheet5.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>' if observations is not None else '') + '</Types>')
-        arc.writestr('_rels/.rels', '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>')
-        arc.writestr('xl/workbook.xml', f'<?xml version="1.0" encoding="UTF-8" standalone="yes"?><workbook xmlns="{NS}" xmlns:r="{REL}"><sheets><sheet name="46項目サマリー" sheetId="1" r:id="rId1"/><sheet name="地域別証拠" sheetId="2" r:id="rId2"/><sheet name="実行メタデータ" sheetId="3" r:id="rId3"/><sheet name="リソース台帳" sheetId="4" r:id="rId4"/>{'<sheet name="属性別検証結果" sheetId="5" r:id="rId6"/>' if observations is not None else ''}</sheets></workbook>')
-        arc.writestr('xl/_rels/workbook.xml.rels', '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet2.xml"/><Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet3.xml"/><Relationship Id="rId5" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/><Relationship Id="rId4" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet4.xml"/>' + ('<Relationship Id="rId6" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet5.xml"/>' if observations is not None else '') + '</Relationships>')
-        arc.writestr('xl/styles.xml', f'<?xml version="1.0" encoding="UTF-8" standalone="yes"?><styleSheet xmlns="{NS}"><fonts count="2"><font><sz val="10"/><name val="Aptos"/></font><font><b/><sz val="10"/><color rgb="FFFFFFFF"/><name val="Aptos"/></font></fonts><fills count="3"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill><fill><patternFill patternType="solid"><fgColor rgb="FF153A59"/><bgColor indexed="64"/></patternFill></fill></fills><borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders><cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs><cellXfs count="2"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/><xf numFmtId="0" fontId="1" fillId="2" borderId="0" xfId="0" applyFont="1" applyFill="1"/></cellXfs></styleSheet>')
-        for i, (matrix, widths) in enumerate(tables, 1):
-            arc.writestr(f'xl/worksheets/sheet{i}.xml', _sheet_xml(matrix, widths))
-    return wb.getvalue()
+    names = ['46項目サマリー', '地域別証拠', '実行メタデータ', 'リソース台帳']
+    if observations is not None:
+        names.append('属性別検証結果')
+    return _workbook_bytes([
+        (name, matrix, widths)
+        for name, (matrix, widths) in zip(names, tables)])
 
 
 def _private_bytes(path: Path, content: bytes) -> None:
@@ -153,12 +234,14 @@ def _private_bytes(path: Path, content: bytes) -> None:
             raise
 
 
-def export_report(out_dir: str, findings: list[Finding], metadata: dict, resource_inventory: dict | None = None) -> list[Path]:
+def export_report(out_dir: str, findings: list[Finding], metadata: dict,
+                  resource_inventory: dict | None = None,
+                  review: ControlReview | None = None) -> list[Path]:
     folder = Path(out_dir).expanduser().resolve()
     folder.mkdir(mode=0o700, parents=True, exist_ok=True)
     observed = resource_inventory.get('control_observations') if resource_inventory else None
     rows = overall_rows(findings, coverage_full=metadata.get('region_coverage_full') is True,
-                        observations=observed)
+                        observations=observed, review=review)
     details = [r.to_dict() for r in findings]
     for row in details:
         row['No'] = row.pop('number')

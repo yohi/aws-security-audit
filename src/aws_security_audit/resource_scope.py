@@ -733,6 +733,14 @@ def collect_resource_inventory(ctx, regions, product=None, product_tag=None):
         shared = collect_shared_security_evidence(ctx, regions, errors)
     scope['service_counts'] = dict(Counter(r['service'] for r in selected))
     scope['collection_errors'] = len(errors)
+    # Offline diagnostics: what the selector searched and what it cannot
+    # prove. Derived from the already returned inventory and any active
+    # capture snapshot; candidates are never promoted into resources.
+    from .read_capture import active_capture
+    from .scope_coverage import scope_diagnostics_to_json
+    capture = active_capture()
+    calls = capture.snapshot() if capture is not None else ()
+    scope.update(scope_diagnostics_to_json(inventory, selected, scope, calls))
     report = {'schema': 'aws-security-resource-inventory-v1',
               'scope': scope, 'regions_requested': list(regions),
               'resources': selected, 'collection_errors': errors,

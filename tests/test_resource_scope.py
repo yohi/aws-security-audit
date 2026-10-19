@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import csv
 import json
-from io import StringIO
 from zipfile import ZipFile
 from xml.etree import ElementTree as ET
 
@@ -499,7 +498,6 @@ def test_sg_rules_are_structured_identifiers_without_descriptions():
 
 
 def test_elb_ssl_policy_probed_and_cannot_infer_pass_from_policy_name(monkeypatch):
-    from aws_security_audit.core import EvidenceUnavailable
     import aws_security_audit.resource_scope as scope
 
     class Ctx:
@@ -795,3 +793,58 @@ def test_non_product_report_keeps_existing_four_sheet_contract(tmp_path):
         assert zip_file.testzip() is None
         assert 'xl/worksheets/sheet4.xml' in zip_file.namelist()
         assert 'xl/worksheets/sheet5.xml' not in zip_file.namelist()
+
+
+def _prepare_diagnostics_collection(monkeypatch, resources):
+    import aws_security_audit.resource_scope as mod
+
+    def ec2(ctx, region, output, errors):
+        output.extend(resources)
+
+    monkeypatch.setattr(mod, '_add_ec2', ec2)
+    for name in ('_add_rds', '_add_elb', '_add_logs', '_add_s3', '_add_iam',
+                 '_add_cloudfront'):
+        monkeypatch.setattr(mod, name, lambda *args: None)
+    monkeypatch.setattr(
+        'aws_security_audit.shared_security_evidence.collect_shared_security_evidence',
+        lambda *args: {'attribution': 'SHARED_UNATTRIBUTED', 'regions': []})
+    return mod
+
+
+class _Ctx:
+
+    def guard_expiration(self):
+        pass
+
+    def client_cached(self, service, region):
+        return (service, region)
+
+
+def test_inventory_scope_checks_are_appended_without_selection_change(
+        monkeypatch):
+    mod = _prepare_diagnostics_collection(monkeypatch, [
+        _record('ec2', 'instance', 'ap-northeast-1', 'i-ros-prd',
+                tags=[{'Key': 'Name', 'Value': 'ros-prd-api'}]),
+        _record('ec2', 'instance', 'ap-northeast-1', 'i-roslyn',
+                tags=[{'Key': 'Name', 'Value': 'roslyn-app'}]),
+        _record('s3', 'bucket', 'global', 'dh-ros-assets'),
+    ])
+    inventory = mod.collect_resource_inventory(
+        _Ctx(), ['ap-northeast-1'], 'ros')
+    checks = inventory['scope']['scope_checks']
+    assert all(isinstance(c['coverage_state'], str) for c in checks)
+    flat_selected = {
+        key for c in checks for key in c['selected_resource_keys']}
+    # Candidates are never promoted: they stay out of selected keys and
+    # out of the returned resources entirely.
+    assert ('ap-northeast-1/instance/i-roslyn' not in flat_selected
+            and 'global/bucket/dh-ros-assets' not in flat_selected)
+    assert {r['resource_id'] for r in inventory['resources']} == {'i-ros-prd'}
+    hints = next(c for c in checks
+                 if c['selector_basis'] == 'NAME:product-token-hint')
+    assert (
+        'ap-northeast-1/instance/i-roslyn' in hints['candidate_resource_keys']
+        and 'global/bucket/dh-ros-assets' in hints['candidate_resource_keys']
+        and 'hints only' in str(hints['limitations']))
+    assert inventory['scope']['matched'] == 1
+    assert inventory['scope']['unassigned'] == 2

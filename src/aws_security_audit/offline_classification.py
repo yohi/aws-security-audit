@@ -8,7 +8,6 @@ from __future__ import annotations
 
 from collections import Counter
 
-from .catalog import CHECKS
 from .classification_contract import output_contract, validate_r21_result
 from .evidence_reconciliation import reconcile_control
 from .shared_evidence import build_cross_control_evidence, build_shared_scope_contract
@@ -152,6 +151,16 @@ def build_decision_support(controls: list[dict], inventory: dict, *, r21_contrac
         'temporary_unresolved': 'EVIDENCE_PENDING',
         'llm_aws_access': 'PROHIBITED',
         'manual_checks_minimization': 'AUTO_EVIDENCE_FIRST_THEN_ONLY_BLOCKING_OWNER_INPUT',
+        # Residual question deduplication lives in the review model only;
+        # this contract declares where it renders and never changes the
+        # R21 classification schema or its strict validator.
+        'evidence_request_contract': {
+            'schema': 'aws-security-evidence-request-contract-v1',
+            'rendered_in': 'aws-security-control-review-v1.requests',
+            'grouping_key': ['kind', 'scope_key', 'requirement_key'],
+            'not_part_of_classification_schema': True,
+            'machine_acquisition_hints_are_hints': True,
+        },
         'counts_by_acquisition_route': dict(Counter(p['acquisition_route'] for p in plans)),
         'machine_evidence_first': [
             p['number'] for p in plans if p['acquisition_route'] != 'OWNER_DOCUMENTATION'],
