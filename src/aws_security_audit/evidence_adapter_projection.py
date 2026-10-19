@@ -109,7 +109,8 @@ def _joined_calls(row: JsonObject, calls: tuple[CallRecord, ...]) -> tuple[str, 
     matches = [
         call.id for call in calls
         if call.collection_state is CollectionState.OBSERVED
-        and call.service == service and call.region == region
+        and call.service == service
+        and (region == 'global' or call.region == region)
         and resource_ids.intersection(_selector_values(call.safe_selector))
         and (expected_operation is None
              or _operation_key(call.operation) == _operation_key(expected_operation))]

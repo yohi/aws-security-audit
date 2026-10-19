@@ -70,6 +70,10 @@ def build_evidence_progress_with_model(
     mcp_rows = _validate_mcp(bundle, mcp_summary, expected_account)
     # Projection happens behind the same validated inputs; explicit captured
     # CallRecords always stay preferred over the ambient capture context.
+    supplements_supplied = r24 is not None or mcp_summary is not None
+    base_ledger = build_ledger(
+        bundle, expected_account=expected_account,
+        calls=calls, execution=execution) if supplements_supplied else None
     ledger = build_ledger(
         bundle, r24=r24,
         mcp_summary=mcp_summary, expected_account=expected_account,
@@ -88,7 +92,9 @@ def build_evidence_progress_with_model(
     # One criterion-aware review model; never rewrites scanned verdicts.
     # Residual open questions are deduplicated into review-model requests
     # (exact kind/scope/requirement keys), never into the R21 schema.
-    review = review_for_bundle(bundle, ledger, classification)
+    review = review_for_bundle(
+        bundle, ledger, classification, base_ledger=base_ledger,
+        supplements_supplied=supplements_supplied)
     request_ids_by_number = {row.number: row.request_ids
                              for row in review.rows}
     rows = []

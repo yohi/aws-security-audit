@@ -309,6 +309,33 @@ def test_embedded_control_review_is_validated_and_reused():
     assert report['control_review'] == bundle['control_review']
 
 
+def test_embedded_control_review_is_rebuilt_when_supplement_is_supplied():
+    from aws_security_audit.control_review import (
+        build_control_review, control_review_to_json,
+    )
+    from aws_security_audit.evidence_adapters import build_ledger
+    from aws_security_audit.evidence_ledger import ledger_to_json
+    from aws_security_audit.evidence_progress_report import (
+        build_evidence_progress_with_model,
+    )
+    from aws_security_audit.evidence_requests import with_evidence_requests
+
+    bundle = source()
+    ledger = build_ledger(bundle)
+    review = with_evidence_requests(build_control_review(bundle, ledger, None))
+    bundle['evidence_ledger'] = ledger_to_json(ledger)
+    bundle['control_review'] = control_review_to_json(review)
+
+    report, rebuilt_review, supplemented_ledger = build_evidence_progress_with_model(
+        bundle, mcp_summary=mcp())
+
+    assert rebuilt_review != review
+    assert report['control_review'] == control_review_to_json(rebuilt_review)
+    mcp_fact_ids = {fact.id for fact in supplemented_ledger.facts
+                    if fact.source_ref.startswith('mcp_summary.records[')}
+    assert mcp_fact_ids & set(rebuilt_review.rows[7].fact_refs)
+
+
 def test_invalid_embedded_control_review_fails_closed():
     from aws_security_audit.evidence_progress_report import (
         build_evidence_progress_with_model,
